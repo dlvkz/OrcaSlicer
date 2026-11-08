@@ -21,6 +21,10 @@ struct FuzzySkinConfig
     int           noise_octaves;
     double        noise_persistence;
     FuzzySkinMode mode;
+    // Displacement map (NoiseType::DisplacementMap only)
+    std::string                texture;
+    FuzzySkinTextureProjection texture_projection;
+    double                     texture_size;
 
     bool operator==(const FuzzySkinConfig& r) const
     {
@@ -32,7 +36,10 @@ struct FuzzySkinConfig
             && noise_scale == r.noise_scale
             && noise_octaves == r.noise_octaves
             && noise_persistence == r.noise_persistence
-            && mode == r.mode;
+            && mode == r.mode
+            && texture == r.texture
+            && texture_projection == r.texture_projection
+            && texture_size == r.texture_size;
     }
 
     bool operator!=(const FuzzySkinConfig& r) const { return !(*this == r); }
@@ -52,6 +59,10 @@ template<> struct hash<Slic3r::FuzzySkinConfig>
         boost::hash_combine(seed, std::hash<double>{}(c.noise_scale));
         boost::hash_combine(seed, std::hash<int>{}(c.noise_octaves));
         boost::hash_combine(seed, std::hash<double>{}(c.noise_persistence));
+        boost::hash_combine(seed, std::hash<int>{}(int(c.mode)));
+        boost::hash_combine(seed, std::hash<std::string>{}(c.texture));
+        boost::hash_combine(seed, std::hash<int>{}(int(c.texture_projection)));
+        boost::hash_combine(seed, std::hash<double>{}(c.texture_size));
         return seed;
     }
 };

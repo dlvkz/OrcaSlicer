@@ -1,6 +1,16 @@
+#include <cmath>
+#include <csetjmp>
+#include <cstdio>
+#include <map>
+#include <mutex>
 #include <random>
 
+#include <boost/filesystem/operations.hpp>
+#include <boost/nowide/cstdio.hpp>
+#include <png.h>
+
 #include "libslic3r/Algorithm/LineSplit.hpp"
+#include "libslic3r/Exception.hpp"
 #include "libslic3r/Arachne/utils/ExtrusionJunction.hpp"
 #include "libslic3r/Arachne/utils/ExtrusionLine.hpp"
 #include "libslic3r/ClipperUtils.hpp"
@@ -66,14 +76,186 @@ static std::unique_ptr<noise::module::Module> get_noise_module(const FuzzySkinCo
     }
 }
 
-// Thanks Cura developers for this function.
-void fuzzy_polyline(Points& poly, bool closed, coordf_t slice_z, const FuzzySkinConfig& cfg)
-{
-    std::unique_ptr<noise::module::Module> noise = get_noise_module(cfg);
+// ---------------------------------------------------------------------------------------------------------------------
+// Displacement map
+// ---------------------------------------------------------------------------------------------------------------------
 
-    const double min_dist_between_points = cfg.point_distance * 3. / 4.; // hardcoded: the point distance may vary between 3/4 and 5/4 the supplied value
-    const double range_random_point_dist = cfg.point_distance / 2.;
-    double dist_left_over = random_value() * (min_dist_between_points / 2.); // the distance to be traversed on the line before making the first new point
+// Decodes any PNG (grey, palette, RGB, with or without alpha, 1 to 16 bit) to brightness in [0, 1], row 0 at the top.
+// Kept free of C++ objects with destructors between setjmp and the libpng calls that may longjmp.
+static bool read_png_brightness(FILE* file, size_t& cols, size_t& rows, std::vector<float>& out, std::string& error)
+{
+    png_structp png  = png_create_read_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+    png_infop   info = png ? png_create_info_struct(png) : nullptr;
+    if (!png || !info) {
+        png_destroy_read_struct(&png, &info, nullptr);
+        error = "out of memory";
+        return false;
+    }
+    std::vector<png_byte>  pixels;
+    std::vector<png_bytep> row_ptrs;
+    if (setjmp(png_jmpbuf(png))) {
+        png_destroy_read_struct(&png, &info, nullptr);
+        error = "not a readable PNG image";
+        return false;
+    }
+    png_init_io(png, file);
+    png_read_info(png, info);
+    const png_byte color_type = png_get_color_type(png, info);
+    const png_byte bit_depth  = png_get_bit_depth(png, info);
+    png_set_expand(png); // palette -> RGB, grey below 8 bit -> 8 bit, tRNS -> alpha
+    png_set_strip_alpha(png);
+    if (color_type & PNG_COLOR_MASK_COLOR)
+        png_set_rgb_to_gray_fixed(png, 1, -1, -1); // default luma weights
+    if (bit_depth == 16)
+        png_set_swap(png); // native byte order on little endian hosts
+    png_set_interlace_handling(png);
+    png_read_update_info(png, info);
+    cols                    = png_get_image_width(png, info);
+    rows                    = png_get_image_height(png, info);
+    const size_t row_bytes  = png_get_rowbytes(png, info);
+    const bool   sixteen    = png_get_bit_depth(png, info) == 16;
+    if (png_get_channels(png, info) != 1 || cols == 0 || rows == 0) {
+        png_destroy_read_struct(&png, &info, nullptr);
+        error = "unsupported PNG pixel format";
+        return false;
+    }
+    pixels.resize(row_bytes * rows);
+    row_ptrs.resize(rows);
+    for (size_t r = 0; r < rows; ++r)
+        row_ptrs[r] = pixels.data() + r * row_bytes;
+    png_read_image(png, row_ptrs.data());
+    png_read_end(png, nullptr);
+    png_destroy_read_struct(&png, &info, nullptr);
+
+    out.resize(cols * rows);
+    for (size_t r = 0; r < rows; ++r)
+        for (size_t c = 0; c < cols; ++c) {
+            const png_byte* px = row_ptrs[r] + (sixteen ? 2 * c : c);
+            out[r * cols + c]  = sixteen ? float(*reinterpret_cast<const uint16_t*>(px)) / 65535.f : float(*px) / 255.f;
+        }
+    return true;
+}
+
+struct DisplacementMapCacheEntry
+{
+    std::time_t                                 mtime = 0;
+    std::shared_ptr<const DisplacementMap>      map;
+};
+
+static std::mutex                                       g_map_cache_mutex;
+static std::map<std::string, DisplacementMapCacheEntry> g_map_cache;
+
+std::shared_ptr<const DisplacementMap> load_displacement_map(const std::string& path, std::string* error, bool reload_if_modified)
+{
+    auto fail = [error](const std::string& msg) -> std::shared_ptr<const DisplacementMap> {
+        if (error)
+            *error = msg;
+        return nullptr;
+    };
+    if (path.empty())
+        return fail("no displacement map image is set");
+
+    std::lock_guard<std::mutex> lock(g_map_cache_mutex);
+    auto                        it = g_map_cache.find(path);
+    if (it != g_map_cache.end() && !reload_if_modified)
+        return it->second.map;
+
+    boost::system::error_code ec;
+    const std::time_t         mtime = boost::filesystem::last_write_time(boost::filesystem::path(path), ec);
+    if (ec)
+        return fail("cannot open \"" + path + "\"");
+    if (it != g_map_cache.end() && it->second.mtime == mtime)
+        return it->second.map;
+
+    FILE* file = boost::nowide::fopen(path.c_str(), "rb");
+    if (!file)
+        return fail("cannot open \"" + path + "\"");
+    auto        map = std::make_shared<DisplacementMap>();
+    std::string why;
+    const bool  ok = read_png_brightness(file, map->cols, map->rows, map->height, why);
+    fclose(file);
+    if (!ok)
+        return fail("\"" + path + "\": " + why);
+
+    g_map_cache[path] = {mtime, map};
+    return map;
+}
+
+// Bilinear sample with wrap-around. u runs left to right and v bottom to top, one tile per unit.
+double DisplacementMap::sample(double u, double v) const
+{
+    const double x  = (u - std::floor(u)) * double(cols) - 0.5;
+    const double y  = (1. - (v - std::floor(v))) * double(rows) - 0.5;
+    const double fx = std::floor(x), fy = std::floor(y);
+    const double tx = x - fx, ty = y - fy;
+    auto         wrap = [](long i, size_t n) { return size_t(((i % long(n)) + long(n)) % long(n)); };
+    const size_t c0 = wrap(long(fx), cols), c1 = wrap(long(fx) + 1, cols);
+    const size_t r0 = wrap(long(fy), rows), r1 = wrap(long(fy) + 1, rows);
+    const double top    = height[r0 * cols + c0] * (1. - tx) + height[r0 * cols + c1] * tx;
+    const double bottom = height[r1 * cols + c0] * (1. - tx) + height[r1 * cols + c1] * tx;
+    return top * (1. - ty) + bottom * ty;
+}
+
+// Displacement in [-1, 1] at a wall point p (mm, object coordinates centred on the object's XY bounding box)
+// whose outward normal is n, at height z.
+static double displacement_map_value(const DisplacementMap& map, const FuzzySkinConfig& cfg, const Vec2d& p, const Vec2d& n, double z)
+{
+    double value;
+    if (cfg.texture_projection == FuzzySkinTextureProjection::Cylindrical) {
+        // One turn around the object is one tile wide, counter-clockwise seen from above so the image is not mirrored.
+        // The middle of the image faces the front (-Y) and the seam is at the back.
+        const double u = (std::atan2(p.y(), p.x()) + 0.5 * M_PI) / (2. * M_PI) + 0.5;
+        value          = map.sample(u, z / cfg.texture_size);
+    } else {
+        // Box: project from +-X and +-Y, with u running to the viewer's right on every side, and blend by the normal.
+        // The middle of a tile is on the object's centre line, so an image one side wide sits centred on that side.
+        const double tile_w = cfg.texture_size;
+        const double tile_h = cfg.texture_size * double(map.rows) / double(map.cols);
+        const double v      = z / tile_h;
+        double       wx     = std::pow(n.x(), 4.), wy = std::pow(n.y(), 4.);
+        const double sum    = wx + wy;
+        wx /= sum;
+        wy /= sum;
+        value = 0.;
+        if (wx > 1e-4)
+            value += wx * map.sample((n.x() >= 0. ? p.y() : -p.y()) / tile_w + 0.5, v);
+        if (wy > 1e-4)
+            value += wy * map.sample((n.y() >= 0. ? -p.x() : p.x()) / tile_w + 0.5, v);
+    }
+    return value * 2. - 1.;
+}
+
+static std::shared_ptr<const DisplacementMap> get_displacement_map(const FuzzySkinConfig& cfg)
+{
+    std::string error;
+    auto        map = load_displacement_map(cfg.texture, &error, false);
+    if (!map)
+        throw Slic3r::SlicingError("Fuzzy skin displacement map: " + error);
+    return map;
+}
+
+// Unit outward normal of the segment p0p1. perp() points to the left of the direction of travel.
+static Vec2d outward_normal(const Vec2d& p0p1, bool material_on_left)
+{
+    const Vec2d left = perp(p0p1).normalized();
+    return material_on_left ? Vec2d(-left) : left;
+}
+
+// Thanks Cura developers for this function.
+void fuzzy_polyline(Points& poly, bool closed, coordf_t slice_z, const FuzzySkinConfig& cfg, bool material_on_left)
+{
+    const bool use_map = cfg.noise_type == NoiseType::DisplacementMap;
+    std::shared_ptr<const DisplacementMap> map;
+    std::unique_ptr<noise::module::Module> noise;
+    if (use_map)
+        map = get_displacement_map(cfg);
+    else
+        noise = get_noise_module(cfg);
+
+    // A displacement map is sampled at an even spacing, so the same wall gives the same texture on every layer.
+    const double min_dist_between_points = use_map ? double(cfg.point_distance) : cfg.point_distance * 3. / 4.; // hardcoded: the point distance may vary between 3/4 and 5/4 the supplied value
+    const double range_random_point_dist = use_map ? 0. : cfg.point_distance / 2.;
+    double dist_left_over = use_map ? 0. : random_value() * (min_dist_between_points / 2.); // the distance to be traversed on the line before making the first new point
     Point* p0 = &poly.back();
     Points out;
     out.reserve(poly.size());
@@ -93,6 +275,12 @@ void fuzzy_polyline(Points& poly, bool closed, coordf_t slice_z, const FuzzySkin
             p0pa_dist += min_dist_between_points + random_value() * range_random_point_dist)
         {
             Point pa = *p0 + (p0p1 * (p0pa_dist / p0p1_size)).cast<coord_t>();
+            if (use_map) {
+                const Vec2d n = outward_normal(p0p1, material_on_left);
+                const double r = displacement_map_value(*map, cfg, unscale(pa), n, slice_z) * cfg.thickness;
+                out.emplace_back(pa + (n * r).cast<coord_t>());
+                continue;
+            }
             double r = noise->GetValue(unscale_(pa.x()), unscale_(pa.y()), slice_z) * cfg.thickness;
             out.emplace_back(pa + (perp(p0p1).cast<double>().normalized() * r).cast<coord_t>());
         }
@@ -111,14 +299,20 @@ void fuzzy_polyline(Points& poly, bool closed, coordf_t slice_z, const FuzzySkin
 }
 
 // Thanks Cura developers for this function.
-void fuzzy_extrusion_line(Arachne::ExtrusionJunctions& ext_lines, coordf_t slice_z, const FuzzySkinConfig& cfg)
+void fuzzy_extrusion_line(Arachne::ExtrusionJunctions& ext_lines, coordf_t slice_z, const FuzzySkinConfig& cfg, bool material_on_left)
 {
-    std::unique_ptr<noise::module::Module> noise = get_noise_module(cfg);
+    const bool use_map = cfg.noise_type == NoiseType::DisplacementMap;
+    std::shared_ptr<const DisplacementMap> map;
+    std::unique_ptr<noise::module::Module> noise;
+    if (use_map)
+        map = get_displacement_map(cfg);
+    else
+        noise = get_noise_module(cfg);
 
-    const double min_dist_between_points = cfg.point_distance * 3. / 4.; // hardcoded: the point distance may vary between 3/4 and 5/4 the supplied value
-    const double range_random_point_dist = cfg.point_distance / 2.;
+    const double min_dist_between_points = use_map ? double(cfg.point_distance) : cfg.point_distance * 3. / 4.; // hardcoded: the point distance may vary between 3/4 and 5/4 the supplied value
+    const double range_random_point_dist = use_map ? 0. : cfg.point_distance / 2.;
     const double min_extrusion_width = 0.01; // workaround for many print options. Need overwrite formula with the layer height parameter. The width must more than >>> layer_height * (1 - 0.25 * PI) * 1.05 <<< (last num is the coeff of overlay error case)
-    double dist_left_over = random_value() * (min_dist_between_points / 2.); // the distance to be traversed on the line before making the first new point
+    double dist_left_over = use_map ? 0. : random_value() * (min_dist_between_points / 2.); // the distance to be traversed on the line before making the first new point
 
     auto* p0 = &ext_lines.front();
     Arachne::ExtrusionJunctions out;
@@ -135,17 +329,21 @@ void fuzzy_extrusion_line(Arachne::ExtrusionJunctions& ext_lines, coordf_t slice
         double p0pa_dist = dist_left_over;
         for (; p0pa_dist < p0p1_size; p0pa_dist += min_dist_between_points + random_value() * range_random_point_dist) {
             Point pa = p0->p + (p0p1 * (p0pa_dist / p0p1_size)).cast<coord_t>();
-            double r = noise->GetValue(unscale_(pa.x()), unscale_(pa.y()), slice_z) * cfg.thickness;
+            // Direction a positive displacement moves the point. Noise is symmetric, so it keeps the historic left side;
+            // a displacement map needs the side away from the material, so white is a bump and not a dent.
+            const Vec2d dir = use_map ? outward_normal(p0p1, material_on_left) : Vec2d(perp(p0p1).cast<double>().normalized());
+            double r = use_map ? displacement_map_value(*map, cfg, unscale(pa), dir, slice_z) * cfg.thickness
+                               : noise->GetValue(unscale_(pa.x()), unscale_(pa.y()), slice_z) * cfg.thickness;
             switch (cfg.mode) { //the curly code for testing
                 case FuzzySkinMode::Displacement :
-                    out.emplace_back(pa + (perp(p0p1).cast<double>().normalized() * r).cast<coord_t>(), p1.w, p1.perimeter_index);
+                    out.emplace_back(pa + (dir * r).cast<coord_t>(), p1.w, p1.perimeter_index);
                     break;
                 case FuzzySkinMode::Extrusion :
                     out.emplace_back(pa, std::max(p1.w + r + min_extrusion_width,  min_extrusion_width), p1.perimeter_index); 
                     break;
                 case FuzzySkinMode::Combined :
                     double rad = std::max(p1.w + r + min_extrusion_width,  min_extrusion_width);
-                    out.emplace_back(pa + (perp(p0p1).cast<double>().normalized() * ((rad  - p1.w) / 2)).cast<coord_t>(), rad, p1.perimeter_index); //0.05 - minimum width of extruded line
+                    out.emplace_back(pa + (dir * ((rad  - p1.w) / 2)).cast<coord_t>(), rad, p1.perimeter_index); //0.05 - minimum width of extruded line
                     break;
             }
         }
@@ -187,7 +385,10 @@ void group_region_by_fuzzify(PerimeterGenerator& g)
                                   region_config.fuzzy_skin_scale,
                                   region_config.fuzzy_skin_octaves,
                                   region_config.fuzzy_skin_persistence,
-                                  region_config.fuzzy_skin_mode};
+                                  region_config.fuzzy_skin_mode,
+                                  region_config.fuzzy_skin_texture.value,
+                                  region_config.fuzzy_skin_texture_projection,
+                                  region_config.fuzzy_skin_texture_size};
         auto&                 surfaces = regions[cfg];
         for (const auto& surface : region->slices.surfaces) {
             surfaces.push_back(&surface);
@@ -229,11 +430,56 @@ bool should_fuzzify(const FuzzySkinConfig& config, const int layer_id, const siz
     return is_contour ? fuzzify_contours : fuzzify_holes;
 }
 
+bool displaced_outline(const Layer& layer, ExPolygons& out)
+{
+    const PrintRegionConfig* found = nullptr;
+    for (const LayerRegion* layerm : layer.regions()) {
+        const PrintRegionConfig& rc = layerm->region().config();
+        if (rc.fuzzy_skin.value != FuzzySkinType::None && rc.fuzzy_skin_noise_type.value == NoiseType::DisplacementMap &&
+            !layerm->slices.empty()) {
+            found = &rc;
+            break;
+        }
+    }
+    if (found == nullptr)
+        return false;
+    const FuzzySkinConfig cfg{found->fuzzy_skin,
+                              scaled<coord_t>(found->fuzzy_skin_thickness.value),
+                              scaled<coord_t>(found->fuzzy_skin_point_distance.value),
+                              found->fuzzy_skin_first_layer,
+                              found->fuzzy_skin_noise_type,
+                              found->fuzzy_skin_scale,
+                              found->fuzzy_skin_octaves,
+                              found->fuzzy_skin_persistence,
+                              found->fuzzy_skin_mode,
+                              found->fuzzy_skin_texture.value,
+                              found->fuzzy_skin_texture_projection,
+                              found->fuzzy_skin_texture_size};
+    if (cfg.thickness <= 0 || cfg.point_distance <= 0)
+        return false;
+
+    const int layer_id = int(layer.id());
+    auto      displace = [&](Polygon& polygon, bool is_contour) {
+        if (polygon.points.size() < 3 || !should_fuzzify(cfg, layer_id, 0, is_contour))
+            return;
+        fuzzy_polyline(polygon.points, true, layer.slice_z, cfg, polygon.is_counter_clockwise() == is_contour);
+    };
+    out = layer.lslices;
+    for (ExPolygon& expoly : out) {
+        displace(expoly.contour, true);
+        for (Polygon& hole : expoly.holes)
+            displace(hole, false);
+    }
+    return true;
+}
+
 Polygon apply_fuzzy_skin(const Polygon& polygon, const PerimeterGenerator& perimeter_generator, const size_t loop_idx, const bool is_contour)
 {
     Polygon fuzzified;
 
     const auto  slice_z = perimeter_generator.slice_z;
+    // The material is inside a contour and outside a hole, whichever way the loop runs.
+    const bool  material_on_left = polygon.is_counter_clockwise() == is_contour;
     const auto& regions = perimeter_generator.regions_by_fuzzify;
     if (regions.size() == 1) { // optimization
         const auto& config  = regions.begin()->first;
@@ -243,7 +489,7 @@ Polygon apply_fuzzy_skin(const Polygon& polygon, const PerimeterGenerator& perim
         }
 
         fuzzified = polygon;
-        fuzzy_polyline(fuzzified.points, true, slice_z, config);
+        fuzzy_polyline(fuzzified.points, true, slice_z, config, material_on_left);
         return fuzzified;
     }
 
@@ -291,16 +537,16 @@ Polygon apply_fuzzy_skin(const Polygon& polygon, const PerimeterGenerator& perim
         // Fuzzy splitted polygon
         if (std::all_of(splitted.begin(), splitted.end(), [](const Algorithm::SplitLineJunction& j) { return j.clipped; })) {
             // The entire polygon is fuzzified
-            fuzzy_polyline(fuzzified.points, true, slice_z, r.first);
+            fuzzy_polyline(fuzzified.points, true, slice_z, r.first, material_on_left);
         } else {
             Points segment;
             segment.reserve(splitted.size());
             fuzzified.points.clear();
 
-            const auto fuzzy_current_segment = [&segment, &fuzzified, &r, slice_z]() {
+            const auto fuzzy_current_segment = [&segment, &fuzzified, &r, slice_z, material_on_left]() {
                 fuzzified.points.push_back(segment.front());
                 const auto back = segment.back();
-                fuzzy_polyline(segment, false, slice_z, r.first);
+                fuzzy_polyline(segment, false, slice_z, r.first, material_on_left);
                 fuzzified.points.insert(fuzzified.points.end(), segment.begin(), segment.end());
                 fuzzified.points.push_back(back);
                 segment.clear();
@@ -332,12 +578,21 @@ Polygon apply_fuzzy_skin(const Polygon& polygon, const PerimeterGenerator& perim
 void apply_fuzzy_skin(Arachne::ExtrusionLine* extrusion, const PerimeterGenerator& perimeter_generator, const bool is_contour)
 {
     const auto  slice_z = perimeter_generator.slice_z;
+    // The material is inside a contour and outside a hole. An open line has material on both sides; keep the left.
+    bool material_on_left = true;
+    if (extrusion->is_closed && extrusion->junctions.size() >= 3) {
+        double area2 = 0.;
+        const auto& js = extrusion->junctions;
+        for (size_t i = 0, j = js.size() - 1; i < js.size(); j = i++)
+            area2 += double(js[j].p.x()) * double(js[i].p.y()) - double(js[i].p.x()) * double(js[j].p.y());
+        material_on_left = (area2 > 0.) == is_contour;
+    }
     const auto& regions = perimeter_generator.regions_by_fuzzify;
     if (regions.size() == 1) { // optimization
         const auto& config  = regions.begin()->first;
         const bool  fuzzify = should_fuzzify(config, perimeter_generator.layer_id, extrusion->inset_idx, is_contour);
         if (fuzzify)
-            fuzzy_extrusion_line(extrusion->junctions, slice_z, config);
+            fuzzy_extrusion_line(extrusion->junctions, slice_z, config, material_on_left);
     } else {
         // Find all affective regions
         std::vector<std::pair<const FuzzySkinConfig&, const ExPolygons&>> fuzzified_regions;
@@ -359,17 +614,17 @@ void apply_fuzzy_skin(Arachne::ExtrusionLine* extrusion, const PerimeterGenerato
                 // Fuzzy splitted extrusion
                 if (std::all_of(splitted.begin(), splitted.end(), [](const Algorithm::SplitLineJunction& j) { return j.clipped; })) {
                     // The entire polygon is fuzzified
-                    fuzzy_extrusion_line(extrusion->junctions, slice_z, r.first);
+                    fuzzy_extrusion_line(extrusion->junctions, slice_z, r.first, material_on_left);
                 } else {
                     const auto                              current_ext = extrusion->junctions;
                     std::vector<Arachne::ExtrusionJunction> segment;
                     segment.reserve(current_ext.size());
                     extrusion->junctions.clear();
 
-                    const auto fuzzy_current_segment = [&segment, &extrusion, &r, slice_z]() {
+                    const auto fuzzy_current_segment = [&segment, &extrusion, &r, slice_z, material_on_left]() {
                         extrusion->junctions.push_back(segment.front());
                         const auto back = segment.back();
-                        fuzzy_extrusion_line(segment, slice_z, r.first);
+                        fuzzy_extrusion_line(segment, slice_z, r.first, material_on_left);
                         extrusion->junctions.insert(extrusion->junctions.end(), segment.begin(), segment.end());
                         extrusion->junctions.push_back(back);
                         segment.clear();

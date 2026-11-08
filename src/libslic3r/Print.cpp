@@ -21,6 +21,7 @@
 #include "FilamentHotBedNozzleRules.hpp"
 #include "Model.hpp"
 #include "format.hpp"
+#include "Feature/FuzzySkin/FuzzySkin.hpp"
 #include <float.h>
 
 #include <algorithm>
@@ -1960,6 +1961,16 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
 				for (const PrintRegion &region : object->all_regions())
                     if (!validate_extrusion_width(region.config(), opt_key, layer_height, err_msg))
 		            	return  {err_msg, object, opt_key};
+
+            // A fuzzy skin displacement map must be a readable image. Loading it here also picks up an edited image.
+            for (const PrintRegion &region : object->all_regions()) {
+                const PrintRegionConfig &region_config = region.config();
+                if (region_config.fuzzy_skin.value == FuzzySkinType::None || region_config.fuzzy_skin_noise_type.value != NoiseType::DisplacementMap)
+                    continue;
+                std::string map_error;
+                if (!Feature::FuzzySkin::load_displacement_map(region_config.fuzzy_skin_texture.value, &map_error, true))
+                    return {Slic3r::format(_u8L("Fuzzy skin displacement map: %1%"), map_error), object, "fuzzy_skin_texture"};
+            }
         }
     }
 

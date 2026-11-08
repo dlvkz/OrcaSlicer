@@ -129,9 +129,16 @@ static t_config_enum_values s_keys_map_NoiseType {
     { "perlin",         int(NoiseType::Perlin) },
     { "billow",         int(NoiseType::Billow) },
     { "ridgedmulti",    int(NoiseType::RidgedMulti) },
-    { "voronoi",        int(NoiseType::Voronoi) }
+    { "voronoi",        int(NoiseType::Voronoi) },
+    { "displacementmap", int(NoiseType::DisplacementMap) }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NoiseType)
+
+static t_config_enum_values s_keys_map_FuzzySkinTextureProjection {
+    { "box",            int(FuzzySkinTextureProjection::Box) },
+    { "cylindrical",    int(FuzzySkinTextureProjection::Cylindrical) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FuzzySkinTextureProjection)
 
 static t_config_enum_values s_keys_map_FuzzySkinMode {
     { "displacement",   int(FuzzySkinMode::Displacement) },
@@ -3139,18 +3146,22 @@ void PrintConfigDef::init_fff_params()
                      "Perlin: Perlin noise, which gives a more consistent texture.\n"
                      "Billow: Similar to perlin noise, but clumpier.\n"
                      "Ridged Multifractal: Ridged noise with sharp, jagged features. Creates marble-like textures.\n"
-                     "Voronoi: Divides the surface into voronoi cells, and displaces each one by a random amount. Creates a patchwork texture.");
+                     "Voronoi: Divides the surface into voronoi cells, and displaces each one by a random amount. Creates a patchwork texture.\n"
+                     "Displacement map: Displaces the walls by the brightness of a PNG image, like a displacement map in a renderer. "
+                     "White pushes the wall out by the skin thickness, black pulls it in by the same amount, and mid grey leaves it in place.");
     def->enum_keys_map = &ConfigOptionEnum<NoiseType>::get_enum_values();
     def->enum_values.push_back("classic");
     def->enum_values.push_back("perlin");
     def->enum_values.push_back("billow");
     def->enum_values.push_back("ridgedmulti");
     def->enum_values.push_back("voronoi");
+    def->enum_values.push_back("displacementmap");
     def->enum_labels.push_back(L("Classic"));
     def->enum_labels.push_back(L("Perlin"));
     def->enum_labels.push_back(L("Billow"));
     def->enum_labels.push_back(L("Ridged Multifractal"));
     def->enum_labels.push_back(L("Voronoi"));
+    def->enum_labels.push_back(L("Displacement map"));
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionEnum<NoiseType>(NoiseType::Classic));
 
@@ -3181,6 +3192,40 @@ void PrintConfigDef::init_fff_params()
     def->max = 1;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.5));
+
+    def = this->add("fuzzy_skin_texture", coString);
+    def->label = L("Displacement map");
+    def->category = L("Others");
+    def->tooltip = L("Path to the PNG image used by the displacement map noise type. Grey, colour and 16 bit images are read; "
+                     "colour is turned into brightness and transparency is ignored.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("fuzzy_skin_texture_projection", coEnum);
+    def->label = L("Displacement map projection");
+    def->category = L("Others");
+    def->tooltip = L("How the displacement map is wrapped onto the walls.\n"
+                     "Box: The image is projected from the four sides and blended where the wall turns, so it reads the right way round on every side.\n"
+                     "Cylindrical: The image is wrapped once around the vertical axis through the center of the object.");
+    def->enum_keys_map = &ConfigOptionEnum<FuzzySkinTextureProjection>::get_enum_values();
+    def->enum_values.push_back("box");
+    def->enum_values.push_back("cylindrical");
+    def->enum_labels.push_back(L("Box"));
+    def->enum_labels.push_back(L("Cylindrical"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<FuzzySkinTextureProjection>(FuzzySkinTextureProjection::Box));
+
+    def = this->add("fuzzy_skin_texture_size", coFloat);
+    def->label = L("Displacement map size");
+    def->category = L("Others");
+    def->tooltip = L("Size of one tile of the displacement map, in mm, beyond which the image repeats. "
+                     "Box projection: the width of the image on the wall; its height follows the image's aspect ratio. "
+                     "Cylindrical projection: the height of the image; its width is stretched to one turn around the object.");
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->min = 0.1;
+    def->max = 10000;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(20.0));
 
     def = this->add("filter_out_gap_fill", coFloat);
     def->label = L("Filter out tiny gaps");

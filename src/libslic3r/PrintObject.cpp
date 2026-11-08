@@ -1181,6 +1181,9 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "fuzzy_skin_scale"
             || opt_key == "fuzzy_skin_octaves"
             || opt_key == "fuzzy_skin_persistence"
+            || opt_key == "fuzzy_skin_texture"
+            || opt_key == "fuzzy_skin_texture_projection"
+            || opt_key == "fuzzy_skin_texture_size"
             || opt_key == "detect_overhang_wall"
             || opt_key == "overhang_reverse"
             || opt_key == "overhang_reverse_internal_only"
@@ -3303,6 +3306,12 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
         config.sparse_infill_density.value = std::min(config.sparse_infill_density.value, 100.);
     if (config.fuzzy_skin.value != FuzzySkinType::None && (config.fuzzy_skin_point_distance.value < 0.01 || config.fuzzy_skin_thickness.value < 0.001))
         config.fuzzy_skin.value = FuzzySkinType::None;
+    if (config.fuzzy_skin_noise_type.value != NoiseType::DisplacementMap) {
+        // Keep regions that only differ in unused displacement map settings in one group.
+        config.fuzzy_skin_texture.value.clear();
+        config.fuzzy_skin_texture_projection.value = FuzzySkinTextureProjection::Box;
+        config.fuzzy_skin_texture_size.value       = 20.;
+    }
     return config;
 }
 

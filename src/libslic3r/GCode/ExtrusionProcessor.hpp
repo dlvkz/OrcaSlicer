@@ -15,6 +15,7 @@
 #include "../ClipperUtils.hpp"
 #include "../Flow.hpp"
 #include "../Config.hpp"
+#include "../Feature/FuzzySkin/FuzzySkin.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -304,7 +305,10 @@ public:
         if (layer == nullptr) return;
         const PrintObject *object = obj;
         prev_layer_boundaries[object] = next_layer_boundaries[object];
-        next_layer_boundaries[object] = AABBTreeLines::LinesDistancer<Linef>{to_unscaled_linesf(layer->lslices)};
+        // With a displacement map on the walls, the layer as printed carries the map's bumps; measure overhangs against those.
+        ExPolygons displaced;
+        const ExPolygons &boundary = Feature::FuzzySkin::displaced_outline(*layer, displaced) ? displaced : layer->lslices;
+        next_layer_boundaries[object] = AABBTreeLines::LinesDistancer<Linef>{to_unscaled_linesf(boundary)};
         prev_curled_extrusions[object] = next_curled_extrusions[object];
         next_curled_extrusions[object] = AABBTreeLines::LinesDistancer<CurledLine>{layer->curled_lines};
     }

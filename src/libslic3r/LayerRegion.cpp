@@ -9,6 +9,7 @@
 #include "BoundingBox.hpp"
 #include "SVG.hpp"
 #include "Algorithm/RegionExpansion.hpp"
+#include "Feature/FuzzySkin/FuzzySkin.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -217,9 +218,13 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         fill_no_overlap
     );
     
+    // The layer below as printed, when its walls carry a displacement map, so the bumps of this layer's walls that sit
+    // on the bumps below are not taken for overhangs.
+    ExPolygons displaced_lower_slices;
     if (this->layer()->lower_layer != nullptr)
         // Cummulative sum of polygons over all the regions.
-        g.lower_slices = &this->layer()->lower_layer->lslices;
+        g.lower_slices = Feature::FuzzySkin::displaced_outline(*this->layer()->lower_layer, displaced_lower_slices) ?
+                             &displaced_lower_slices : &this->layer()->lower_layer->lslices;
     if (this->layer()->upper_layer != NULL)
         g.upper_slices = &this->layer()->upper_layer->lslices;
 

@@ -54,6 +54,13 @@ enum class NoiseType {
     Billow,
     RidgedMulti,
     Voronoi,
+    DisplacementMap,
+};
+
+// How a fuzzy skin displacement map image is wrapped onto the walls.
+enum class FuzzySkinTextureProjection {
+    Box,
+    Cylindrical,
 };
 
 enum PrintHostType {
@@ -532,6 +539,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(GCodeFlavor)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NoiseType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FuzzySkinTextureProjection)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(InfillPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(IroningType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SlicingMode)
@@ -1089,6 +1097,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                fuzzy_skin_scale))
     ((ConfigOptionInt,                  fuzzy_skin_octaves))
     ((ConfigOptionFloat,                fuzzy_skin_persistence))
+    ((ConfigOptionString,               fuzzy_skin_texture))
+    ((ConfigOptionEnum<FuzzySkinTextureProjection>, fuzzy_skin_texture_projection))
+    ((ConfigOptionFloat,                fuzzy_skin_texture_size))
     ((ConfigOptionFloats,               gap_infill_speed))
     ((ConfigOptionInt,                  sparse_infill_filament))
     ((ConfigOptionFloatOrPercent,       sparse_infill_line_width))
