@@ -27,6 +27,10 @@ struct DisplacementMap
 // Returns nullptr and fills error on failure.
 std::shared_ptr<const DisplacementMap> load_displacement_map(const std::string& path, std::string* error, bool reload_if_modified);
 
+// Displacement in [-1, 1] at a point p (mm, object coordinates centred on the object's XY bounding box) of a surface
+// whose outward unit normal is n.
+double displacement_map_value(const DisplacementMap& map, FuzzySkinTextureProjection projection, double size, const Vec3d& p, const Vec3d& n);
+
 // material_on_left: whether the printed material lies to the left of the direction of travel. A displacement map pushes
 // the wall away from the material; the noise types do not depend on it.
 void fuzzy_polyline(Points& poly, bool closed, coordf_t slice_z, const FuzzySkinConfig& cfg, bool material_on_left = true);

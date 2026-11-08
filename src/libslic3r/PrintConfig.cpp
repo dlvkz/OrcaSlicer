@@ -3227,6 +3227,17 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(20.0));
 
+    def = this->add("fuzzy_skin_texture_surface", coBool);
+    def->label = L("Displace the whole surface");
+    def->category = L("Others");
+    def->tooltip = L("Apply the displacement map to the shape itself, as if the texture were modelled into the mesh: walls, slopes, "
+                     "tops and the undersides of overhangs. A bump on a top is printed on the layers above it, and a dent removes "
+                     "material from the layers below. The face the object stands on stays flat. Walls, skins, overhangs and supports "
+                     "all follow the textured shape.\n"
+                     "When off, only the walls chosen in Fuzzy Skin are moved sideways, layer by layer, which leaves tops flat.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
     def = this->add("filter_out_gap_fill", coFloat);
     def->label = L("Filter out tiny gaps");
     def->category = L("Layers and Perimeters");

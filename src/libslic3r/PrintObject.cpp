@@ -21,6 +21,9 @@
 #include "Fill/FillLightning.hpp"
 #include "Format/STL.hpp"
 #include "format.hpp"
+#include "Feature/FuzzySkin/SurfaceDisplacement.hpp"
+
+#include <boost/algorithm/string/predicate.hpp>
 
 #include <float.h>
 #include <oneapi/tbb/blocked_range.h>
@@ -884,6 +887,16 @@ SupportLayerPtrs::iterator PrintObject::insert_support_layer(SupportLayerPtrs::i
 
 // Called by Print::apply().
 // This method only accepts PrintObjectConfig and PrintRegionConfig option keys.
+// Whether a region config, old or new, displaces the whole surface with a map, which makes fuzzy skin part of slicing.
+static bool surface_displacement_in(const ConfigOptionResolver &config)
+{
+    const ConfigOption *type = config.option("fuzzy_skin"), *noise = config.option("fuzzy_skin_noise_type"),
+                       *surface = config.option("fuzzy_skin_texture_surface"), *thickness = config.option("fuzzy_skin_thickness");
+    return type != nullptr && noise != nullptr && surface != nullptr && thickness != nullptr &&
+           type->getInt() != int(FuzzySkinType::None) && noise->getInt() == int(NoiseType::DisplacementMap) &&
+           surface->getBool() && thickness->getFloat() > 0.;
+}
+
 bool PrintObject::invalidate_state_by_config_options(
     const ConfigOptionResolver &old_config, const ConfigOptionResolver &new_config, const std::vector<t_config_option_key> &opt_keys)
 {
@@ -1184,6 +1197,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "fuzzy_skin_texture"
             || opt_key == "fuzzy_skin_texture_projection"
             || opt_key == "fuzzy_skin_texture_size"
+            || opt_key == "fuzzy_skin_texture_surface"
             || opt_key == "detect_overhang_wall"
             || opt_key == "overhang_reverse"
             || opt_key == "overhang_reverse_internal_only"
@@ -1194,6 +1208,9 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "precise_outer_wall") {
             steps.emplace_back(posPerimeters);
             steps.emplace_back(posSupportMaterial);
+            // A displacement map on the whole surface changes the slices themselves, and the object's height.
+            if (boost::starts_with(opt_key, "fuzzy_skin") && (surface_displacement_in(old_config) || surface_displacement_in(new_config)))
+                steps.emplace_back(posSlice);
             // Whole-object Local-Z masks and tool assignments are built during
             // slicing from the wall filament, not during perimeter generation.
             if (opt_key == "wall_filament" && m_print->config().dithering_local_z_mode.value &&
@@ -3311,6 +3328,7 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
         config.fuzzy_skin_texture.value.clear();
         config.fuzzy_skin_texture_projection.value = FuzzySkinTextureProjection::Box;
         config.fuzzy_skin_texture_size.value       = 20.;
+        config.fuzzy_skin_texture_surface.value    = true;
     }
     return config;
 }
@@ -3335,11 +3353,24 @@ void PrintObject::generate_support_preview()
     profiler.duration2 = (ts3 - ts2).total_milliseconds();
 }
 
+// How much a displacement map on the whole surface may raise the top of the object.
+static double surface_displacement_margin(const PrintRegionConfig &default_region_config, const ModelObject &model_object, size_t num_extruders)
+{
+    double margin = 0.;
+    for (const ModelVolume *model_volume : model_object.volumes)
+        if (model_volume->is_model_part())
+            margin = std::max(margin, Feature::FuzzySkin::surface_displacement_height_margin(
+                                          region_config_from_model_volume(default_region_config, nullptr, *model_volume, num_extruders)));
+    return margin;
+}
+
 void PrintObject::update_slicing_parameters()
 {
     // Orca: updated function call for XYZ shrinkage compensation
     if (!m_slicing_params.valid) {
-          m_slicing_params = SlicingParameters::create_from_config(this->print()->config(), m_config, this->model_object()->max_z(),
+          const double margin = surface_displacement_margin(this->print()->default_region_config(), *this->model_object(),
+                                                            this->print()->config().filament_diameter.size());
+          m_slicing_params = SlicingParameters::create_from_config(this->print()->config(), m_config, this->model_object()->max_z() + margin,
                                                                    this->object_extruders(), this->print()->shrinkage_compensation());
       }
 }
@@ -3380,6 +3411,7 @@ SlicingParameters PrintObject::slicing_parameters(const DynamicPrintConfig &full
 
     if (object_max_z <= 0.f)
         object_max_z = (float)model_object.raw_bounding_box().size().z();
+    object_max_z += float(surface_displacement_margin(default_region_config, model_object, filament_extruders));
     return SlicingParameters::create_from_config(print_config, object_config, object_max_z, object_extruders, object_shrinkage_compensation);
 }
 

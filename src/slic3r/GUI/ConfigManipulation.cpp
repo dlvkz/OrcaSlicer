@@ -891,7 +891,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     const bool fuzzy_skin_is_map = fuzzy_skin_noise_type == NoiseType::DisplacementMap;
     toggle_line("fuzzy_skin_scale", fuzzy_skin_noise_type != NoiseType::Classic && !fuzzy_skin_is_map);
     toggle_line("fuzzy_skin_octaves", fuzzy_skin_noise_type != NoiseType::Classic && fuzzy_skin_noise_type != NoiseType::Voronoi && !fuzzy_skin_is_map);
-    for (auto el : {"fuzzy_skin_texture", "fuzzy_skin_texture_projection", "fuzzy_skin_texture_size"})
+    for (auto el : {"fuzzy_skin_texture", "fuzzy_skin_texture_projection", "fuzzy_skin_texture_size", "fuzzy_skin_texture_surface"})
         toggle_line(el, fuzzy_skin_is_map);
     toggle_line("fuzzy_skin_persistence", fuzzy_skin_noise_type == NoiseType::Perlin || fuzzy_skin_noise_type == NoiseType::Billow);
 

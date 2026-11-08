@@ -22,6 +22,9 @@
 //BBS
 #include "ShortestPath.hpp"
 #include "libslic3r/Feature/Interlocking/InterlockingGenerator.hpp"
+#include "libslic3r/Feature/FuzzySkin/SurfaceDisplacement.hpp"
+
+#include <optional>
 
 //! macro used to mark string used at localization, return same string
 #define L(s) Slic3r::I18N::translate(s)
@@ -72,7 +75,8 @@ static std::vector<ExPolygons> slice_volume(
     const ModelVolume             &volume,
     const std::vector<float>      &zs,
     const MeshSlicingParamsEx     &params,
-    const std::function<void()>   &throw_on_cancel_callback)
+    const std::function<void()>   &throw_on_cancel_callback,
+    const Feature::FuzzySkin::SurfaceDisplacement *displacement = nullptr)
 {
     std::vector<ExPolygons> layers;
     if (! zs.empty()) {
@@ -84,6 +88,11 @@ static std::vector<ExPolygons> slice_volume(
                 its_flip_triangles(its);
             layers = slice_mesh_ex(its, zs, params2, throw_on_cancel_callback);
             throw_on_cancel_callback();
+            // A displacement map on the whole surface: correct the slices from the texture, as if it were modelled.
+            if (displacement != nullptr) {
+                Feature::FuzzySkin::displace_slices(its, params2.trafo, zs, layers, *displacement, throw_on_cancel_callback);
+                throw_on_cancel_callback();
+            }
         }
     }
     return layers;
@@ -96,13 +105,14 @@ static std::vector<ExPolygons> slice_volume(
     const std::vector<float>                    &z,
     const std::vector<t_layer_height_range>     &ranges,
     const MeshSlicingParamsEx                   &params,
-    const std::function<void()>                 &throw_on_cancel_callback)
+    const std::function<void()>                 &throw_on_cancel_callback,
+    const Feature::FuzzySkin::SurfaceDisplacement *displacement = nullptr)
 {
     std::vector<ExPolygons> out;
     if (! z.empty() && ! ranges.empty()) {
         if (ranges.size() == 1 && z.front() >= ranges.front().first && z.back() < ranges.front().second) {
             // All layers fit into a single range.
-            out = slice_volume(volume, z, params, throw_on_cancel_callback);
+            out = slice_volume(volume, z, params, throw_on_cancel_callback, displacement);
         } else {
             std::vector<float>                     z_filtered;
             std::vector<std::pair<size_t, size_t>> n_filtered;
@@ -118,7 +128,7 @@ static std::vector<ExPolygons> slice_volume(
                     n_filtered.emplace_back(std::make_pair(first, i));
             }
             if (! n_filtered.empty()) {
-                std::vector<ExPolygons> layers = slice_volume(volume, z_filtered, params, throw_on_cancel_callback);
+                std::vector<ExPolygons> layers = slice_volume(volume, z_filtered, params, throw_on_cancel_callback, displacement);
                 out.assign(z.size(), ExPolygons());
                 i = 0;
                 for (const std::pair<size_t, size_t> &span : n_filtered)
@@ -180,8 +190,20 @@ static std::vector<VolumeSlices> slice_volumes_inner(
     //const auto   extra_offset  = is_mm_painted ? 0.f : std::max(0.f, float(print_object_config.xy_contour_compensation.value));
     const auto   extra_offset = 0.f;
 
+    // A part's own region (not a modifier's) decides whether its whole surface carries a displacement map.
+    auto surface_displacement = [&layer_ranges](const ModelVolume *model_volume) -> std::optional<Feature::FuzzySkin::SurfaceDisplacement> {
+        if (! model_volume->is_model_part())
+            return std::nullopt;
+        for (const PrintObjectRegions::LayerRangeRegions &layer_range : layer_ranges)
+            for (const PrintObjectRegions::VolumeRegion &volume_region : layer_range.volume_regions)
+                if (volume_region.model_volume == model_volume && volume_region.parent == -1 && volume_region.region != nullptr)
+                    return Feature::FuzzySkin::surface_displacement(volume_region.region->config());
+        return std::nullopt;
+    };
+
     for (const ModelVolume *model_volume : model_volumes)
         if (model_volume_needs_slicing(*model_volume)) {
+            const std::optional<Feature::FuzzySkin::SurfaceDisplacement> displacement = surface_displacement(model_volume);
             MeshSlicingParamsEx params { params_base };
             if (! model_volume->is_negative_volume())
                 params.extra_offset = extra_offset;
@@ -200,7 +222,7 @@ static std::vector<VolumeSlices> slice_volumes_inner(
                     }
                     out.push_back({
                         model_volume->id(),
-                        slice_volume(*model_volume, zs, params, throw_on_cancel_callback)
+                        slice_volume(*model_volume, zs, params, throw_on_cancel_callback, displacement ? &*displacement : nullptr)
                     });
                 }
             } else {
@@ -212,7 +234,7 @@ static std::vector<VolumeSlices> slice_volumes_inner(
                 if (! slicing_ranges.empty())
                     out.push_back({
                         model_volume->id(),
-                        slice_volume(*model_volume, zs, slicing_ranges, params, throw_on_cancel_callback)
+                        slice_volume(*model_volume, zs, slicing_ranges, params, throw_on_cancel_callback, displacement ? &*displacement : nullptr)
                     });
             }
             if (! out.empty() && out.back().slices.empty())

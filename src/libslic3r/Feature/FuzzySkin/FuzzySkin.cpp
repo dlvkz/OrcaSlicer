@@ -22,6 +22,7 @@
 #include "libslic3r/PrintConfig.hpp"
 
 #include "FuzzySkin.hpp"
+#include "SurfaceDisplacement.hpp"
 
 #include "libnoise/noise.h"
 
@@ -198,31 +199,49 @@ double DisplacementMap::sample(double u, double v) const
 
 // Displacement in [-1, 1] at a wall point p (mm, object coordinates centred on the object's XY bounding box)
 // whose outward normal is n, at height z.
-static double displacement_map_value(const DisplacementMap& map, const FuzzySkinConfig& cfg, const Vec2d& p, const Vec2d& n, double z)
+double displacement_map_value(const DisplacementMap& map, FuzzySkinTextureProjection projection, double size, const Vec3d& p, const Vec3d& n)
 {
+    // Sides: tiles along the wall, v up. Tops and bottoms (normal more vertical than 45 degrees in the cylindrical
+    // projection, blended in by the normal in the box projection): seen from above or below, +Y up in the image.
+    const double tile_w   = size;
+    const double tile_h   = size * double(map.rows) / double(map.cols);
+    auto         top_down = [&](double nz) {
+        return map.sample((nz >= 0. ? p.x() : -p.x()) / tile_w + 0.5, p.y() / tile_h + 0.5);
+    };
     double value;
-    if (cfg.texture_projection == FuzzySkinTextureProjection::Cylindrical) {
-        // One turn around the object is one tile wide, counter-clockwise seen from above so the image is not mirrored.
-        // The middle of the image faces the front (-Y) and the seam is at the back.
-        const double u = (std::atan2(p.y(), p.x()) + 0.5 * M_PI) / (2. * M_PI) + 0.5;
-        value          = map.sample(u, z / cfg.texture_size);
+    if (projection == FuzzySkinTextureProjection::Cylindrical) {
+        if (std::abs(n.z()) > M_SQRT1_2) {
+            value = top_down(n.z());
+        } else {
+            // One turn around the object is one tile wide, counter-clockwise seen from above so the image is not mirrored.
+            // The middle of the image faces the front (-Y) and the seam is at the back. The tile is size high.
+            const double u = (std::atan2(p.y(), p.x()) + 0.5 * M_PI) / (2. * M_PI) + 0.5;
+            value          = map.sample(u, p.z() / size);
+        }
     } else {
-        // Box: project from +-X and +-Y, with u running to the viewer's right on every side, and blend by the normal.
+        // Box: project from +-X, +-Y and +-Z, with u running to the viewer's right on every side, and blend by the normal.
         // The middle of a tile is on the object's centre line, so an image one side wide sits centred on that side.
-        const double tile_w = cfg.texture_size;
-        const double tile_h = cfg.texture_size * double(map.rows) / double(map.cols);
-        const double v      = z / tile_h;
-        double       wx     = std::pow(n.x(), 4.), wy = std::pow(n.y(), 4.);
-        const double sum    = wx + wy;
+        const double v  = p.z() / tile_h;
+        double       wx = std::pow(n.x(), 4.), wy = std::pow(n.y(), 4.), wz = std::pow(n.z(), 4.);
+        const double sum = wx + wy + wz;
         wx /= sum;
         wy /= sum;
+        wz /= sum;
         value = 0.;
         if (wx > 1e-4)
             value += wx * map.sample((n.x() >= 0. ? p.y() : -p.y()) / tile_w + 0.5, v);
         if (wy > 1e-4)
             value += wy * map.sample((n.y() >= 0. ? -p.x() : p.x()) / tile_w + 0.5, v);
+        if (wz > 1e-4)
+            value += wz * top_down(n.z());
     }
     return value * 2. - 1.;
+}
+
+// Walls: a point of a layer at height z whose outward normal n is horizontal.
+static double displacement_map_value(const DisplacementMap& map, const FuzzySkinConfig& cfg, const Vec2d& p, const Vec2d& n, double z)
+{
+    return displacement_map_value(map, cfg.texture_projection, cfg.texture_size, Vec3d(p.x(), p.y(), z), Vec3d(n.x(), n.y(), 0.));
 }
 
 static std::shared_ptr<const DisplacementMap> get_displacement_map(const FuzzySkinConfig& cfg)
@@ -377,7 +396,8 @@ void group_region_by_fuzzify(PerimeterGenerator& g)
     std::unordered_map<FuzzySkinConfig, SurfacesPtr> regions;
     for (auto region : *g.compatible_regions) {
         const auto&           region_config = region->region().config();
-        const FuzzySkinConfig cfg{region_config.fuzzy_skin,
+        // A displacement map on the whole surface is already in the slices; the walls are not moved again.
+        const FuzzySkinConfig cfg{uses_surface_displacement(region_config) ? FuzzySkinType::None : region_config.fuzzy_skin.value,
                                   scaled<coord_t>(region_config.fuzzy_skin_thickness.value),
                                   scaled<coord_t>(region_config.fuzzy_skin_point_distance.value),
                                   region_config.fuzzy_skin_first_layer,
@@ -435,8 +455,9 @@ bool displaced_outline(const Layer& layer, ExPolygons& out)
     const PrintRegionConfig* found = nullptr;
     for (const LayerRegion* layerm : layer.regions()) {
         const PrintRegionConfig& rc = layerm->region().config();
+        // With the whole surface displaced, the layer's slices already carry the texture.
         if (rc.fuzzy_skin.value != FuzzySkinType::None && rc.fuzzy_skin_noise_type.value == NoiseType::DisplacementMap &&
-            !layerm->slices.empty()) {
+            !rc.fuzzy_skin_texture_surface.value && !layerm->slices.empty()) {
             found = &rc;
             break;
         }

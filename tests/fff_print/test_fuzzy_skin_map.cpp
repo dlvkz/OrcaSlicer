@@ -2,13 +2,18 @@
 
 #include <boost/filesystem.hpp>
 
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Feature/FuzzySkin/FuzzySkin.hpp"
+#include "libslic3r/Feature/FuzzySkin/SurfaceDisplacement.hpp"
+#include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/TriangleMeshSlicer.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
 #include "libslic3r/Polygon.hpp"
 
 using namespace Slic3r;
 using namespace Slic3r::Feature::FuzzySkin;
 using Catch::Matchers::WithinAbs;
+using Catch::Matchers::WithinRel;
 
 namespace {
 
@@ -179,5 +184,76 @@ TEST_CASE("Fuzzy skin displacement map loading", "[FuzzySkin]")
         REQUIRE(second != nullptr);
         REQUIRE_THAT(second->height[0], WithinAbs(1.f, 1e-4));
         boost::filesystem::remove(path);
+    }
+}
+
+TEST_CASE("Marching squares outlines where a field is positive", "[FuzzySkin]")
+{
+    // A disc of radius 5 and a ring from 2 to 5, on a 0.1 mm grid around the origin.
+    const double step = 0.1, x0 = -6., y0 = -6.;
+    const size_t n    = 121;
+    std::vector<float> disc(n * n), ring(n * n);
+    for (size_t r = 0; r < n; ++r)
+        for (size_t c = 0; c < n; ++c) {
+            const double x = x0 + double(c) * step, y = y0 + double(r) * step, d = std::hypot(x, y);
+            const bool   border = r == 0 || c == 0 || r + 1 == n || c + 1 == n;
+            disc[r * n + c] = border ? -1.f : float(5. - d);
+            ring[r * n + c] = border ? -1.f : float(std::min(5. - d, d - 2.));
+        }
+    SECTION("a disc is one counter-clockwise contour of the right area") {
+        const Polygons p = positive_region_contours(disc, n, n, x0, y0, step);
+        REQUIRE(p.size() == 1);
+        REQUIRE(p.front().is_counter_clockwise());
+        REQUIRE_THAT(unscaled(unscaled(p.front().area())), WithinRel(M_PI * 25., 0.005));
+    }
+    SECTION("a ring is a contour and a clockwise hole") {
+        const ExPolygons ex = union_ex(positive_region_contours(ring, n, n, x0, y0, step));
+        REQUIRE(ex.size() == 1);
+        REQUIRE(ex.front().holes.size() == 1);
+        REQUIRE_THAT(unscaled(unscaled(ex.front().area())), WithinRel(M_PI * (25. - 4.), 0.01));
+    }
+}
+
+TEST_CASE("Whole surface displacement moves walls, tops and leaves the bed face", "[FuzzySkin]")
+{
+    // A 20 mm cube, bottom on the bed, sliced at the first layer, the middle, just under and just over the top.
+    const indexed_triangle_set cube = its_make_cube(20., 20., 20.);
+    const std::vector<float>   zs{0.1f, 10.f, 19.8f, 20.2f};
+    MeshSlicingParamsEx        params;
+    std::vector<ExPolygons>    layers = slice_mesh_ex(cube, zs, params);
+    REQUIRE(layers[3].empty());
+    auto area = [](const ExPolygons& ex) { double a = 0.; for (const ExPolygon& e : ex) a += e.area(); return unscaled(unscaled(a)); };
+
+    auto run = [&](uint8_t grey) {
+        const std::string path = write_columns(std::vector<uint8_t>(8, grey), 8);
+        std::string       error;
+        SurfaceDisplacement sd{load_displacement_map(path, &error, true), FuzzySkinTextureProjection::Box, 20., 0.5, 0.2, true};
+        REQUIRE(sd.map != nullptr);
+        std::vector<ExPolygons> out = layers;
+        displace_slices(cube, Transform3d::Identity(), zs, out, sd, [] {});
+        boost::filesystem::remove(path);
+        return out;
+    };
+
+    SECTION("white: the walls move out, the top rises into the layer above") {
+        const std::vector<ExPolygons> out = run(255);
+        REQUIRE_THAT(area(out[1]), WithinRel(21. * 21., 0.01));   // 0.5 mm out on every side
+        REQUIRE_THAT(area(out[2]), WithinRel(21. * 21., 0.01));
+        REQUIRE(area(out[3]) > 399.);                             // the top, now at 20.5, reaches this layer
+        REQUIRE(area(out[3]) < 442.);
+        REQUIRE_THAT(area(out[0]), WithinRel(21. * 21., 0.01));   // the first layer's walls too, but not below the bed
+    }
+    SECTION("black: the walls move in, the top sinks below the layer under it, the bed face stays") {
+        const std::vector<ExPolygons> out = run(0);
+        REQUIRE_THAT(area(out[1]), WithinRel(19. * 19., 0.01));
+        REQUIRE(area(out[2]) < 1.);                               // the top, now at 19.5, is below 19.8
+        REQUIRE(out[3].empty());
+        REQUIRE_THAT(area(out[0]), WithinRel(19. * 19., 0.01));   // walls in, nothing cut from the bottom
+    }
+    SECTION("mid grey changes nothing") {
+        const std::vector<ExPolygons> out = run(128);
+        for (size_t i = 0; i < 3; ++i)
+            REQUIRE_THAT(area(out[i]), WithinRel(400., 0.01));
+        REQUIRE(area(out[3]) < 1.);
     }
 }

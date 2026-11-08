@@ -3080,6 +3080,7 @@ optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops"
         optgroup->append_single_option_line("fuzzy_skin_texture", "others_settings_fuzzy_skin#displacement-map");
         optgroup->append_single_option_line("fuzzy_skin_texture_projection", "others_settings_fuzzy_skin#displacement-map");
         optgroup->append_single_option_line("fuzzy_skin_texture_size", "others_settings_fuzzy_skin#displacement-map");
+        optgroup->append_single_option_line("fuzzy_skin_texture_surface", "others_settings_fuzzy_skin#displacement-map");
         optgroup->append_single_option_line("fuzzy_skin_first_layer", "others_settings_fuzzy_skin#apply-fuzzy-skin-to-first-layer");
 
         optgroup = page->new_optgroup(L("G-code output"), L"param_gcode");

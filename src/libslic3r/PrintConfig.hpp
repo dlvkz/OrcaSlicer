@@ -1100,6 +1100,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionString,               fuzzy_skin_texture))
     ((ConfigOptionEnum<FuzzySkinTextureProjection>, fuzzy_skin_texture_projection))
     ((ConfigOptionFloat,                fuzzy_skin_texture_size))
+    ((ConfigOptionBool,                 fuzzy_skin_texture_surface))
     ((ConfigOptionFloats,               gap_infill_speed))
     ((ConfigOptionInt,                  sparse_infill_filament))
     ((ConfigOptionFloatOrPercent,       sparse_infill_line_width))
