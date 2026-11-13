@@ -27,6 +27,7 @@
 #include "Plater.hpp"
 #include "Tab.hpp"
 #include "TextToHeightDialog.hpp"
+#include "TextToHeightModels.hpp"
 #include "libslic3r/TextToHeight.hpp"
 
 #include <boost/filesystem/path.hpp>
@@ -641,6 +642,8 @@ void DisplacementPreview::render_panel(GLCanvas3D& canvas)
     };
     // A map made from a description: the pattern becomes an image, the image the new map.
     auto image_from_text = [this, &canvas, object]() {
+        if (!ensure_text_to_height_models(wxGetApp().mainframe))
+            return;
         TextToHeightDialog dlg(wxGetApp().mainframe);
         if (dlg.ShowModal() != wxID_OK || dlg.height_map_path().empty())
             return;

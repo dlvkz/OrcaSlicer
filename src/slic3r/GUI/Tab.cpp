@@ -2,6 +2,7 @@
 //#include "slic3r/Utils/Serial.hpp"
 #include "Tab.hpp"
 #include "TextToHeightDialog.hpp"
+#include "TextToHeightModels.hpp"
 #include "PresetHints.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PresetFlowVariant.hpp"
@@ -3098,6 +3099,8 @@ optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops"
                     auto sizer = new wxBoxSizer(wxHORIZONTAL);
                     sizer->Add(btn, 0, wxALIGN_CENTER_VERTICAL);
                     btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+                        if (!ensure_text_to_height_models(this))
+                            return;
                         TextToHeightDialog dlg(this);
                         if (dlg.ShowModal() != wxID_OK || dlg.height_map_path().empty())
                             return;

@@ -197,6 +197,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/DisplacementPreview.hpp
     GUI/TextToHeightDialog.cpp
     GUI/TextToHeightDialog.hpp
+    GUI/TextToHeightModels.cpp
+    GUI/TextToHeightModels.hpp
     GUI/GLPickingBuffer.cpp
     GUI/GLPickingBuffer.hpp
     GUI/SoftShadowRenderer.cpp
