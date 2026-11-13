@@ -17,6 +17,8 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_filament.cpp
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp
+	test_text_to_height.cpp
+	test_open_surface.cpp
 	test_local_z_order_optimizer.cpp
 	test_placeholder_parser.cpp
 	test_polygon.cpp
@@ -61,6 +63,7 @@ if (WIN32)
     target_link_libraries(${_TEST_NAME}_tests PRIVATE bcrypt.lib crypt32.lib)
 endif()
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
+slic3r_copy_text2height_libs(${_TEST_NAME}_tests)
 
 if (WIN32)
 	if ("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")

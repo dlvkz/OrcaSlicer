@@ -5,12 +5,15 @@
 #include <mutex>
 #include <random>
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/nowide/cstdio.hpp>
 #include <png.h>
 
 #include "libslic3r/Algorithm/LineSplit.hpp"
 #include "libslic3r/Exception.hpp"
+#include "libslic3r/Format/objparser.hpp"
+#include "libslic3r/Format/TexturedMesh.hpp"
 #include "libslic3r/Arachne/utils/ExtrusionJunction.hpp"
 #include "libslic3r/Arachne/utils/ExtrusionLine.hpp"
 #include "libslic3r/ClipperUtils.hpp"
@@ -23,6 +26,7 @@
 
 #include "FuzzySkin.hpp"
 #include "SurfaceDisplacement.hpp"
+#include "TexturePatterns.hpp"
 
 #include "libnoise/noise.h"
 
@@ -171,15 +175,177 @@ std::shared_ptr<const DisplacementMap> load_displacement_map(const std::string& 
     FILE* file = boost::nowide::fopen(path.c_str(), "rb");
     if (!file)
         return fail("cannot open \"" + path + "\"");
+    unsigned char magic[3] = {0, 0, 0};
+    const bool    is_jpeg  = fread(magic, 1, 3, file) == 3 && magic[0] == 0xFF && magic[1] == 0xD8 && magic[2] == 0xFF;
+    rewind(file);
     auto        map = std::make_shared<DisplacementMap>();
     std::string why;
-    const bool  ok = read_png_brightness(file, map->cols, map->rows, map->height, why);
-    fclose(file);
-    if (!ok)
-        return fail("\"" + path + "\": " + why);
+    bool        ok;
+    if (is_jpeg) {
+        // JPEG: 8 bit, through the textured model loader, then to brightness with the same luma weights as PNG.
+        fclose(file);
+        TextureImage image;
+        ok = load_texture_image(path, image, why);
+        if (!ok)
+            return fail(why);
+        map->cols = size_t(image.width);
+        map->rows = size_t(image.height);
+        map->height.resize(map->cols * map->rows);
+        for (size_t i = 0; i < map->height.size(); ++i)
+            map->height[i] = (0.2126f * image.rgb[3 * i] + 0.7152f * image.rgb[3 * i + 1] + 0.0722f * image.rgb[3 * i + 2]) / 255.f;
+    } else {
+        ok = read_png_brightness(file, map->cols, map->rows, map->height, why);
+        fclose(file);
+        if (!ok)
+            return fail("\"" + path + "\": " + why);
+    }
 
     g_map_cache[path] = {mtime, map};
     return map;
+}
+
+std::shared_ptr<const DisplacementMap> load_texture(FuzzySkinTexturePattern pattern, const std::string& path, std::string* error,
+                                                    bool reload_if_modified)
+{
+    if (pattern == FuzzySkinTexturePattern::Image)
+        return load_displacement_map(path, error, reload_if_modified);
+    auto map = pattern_displacement_map(pattern);
+    if (!map && error)
+        *error = "unknown displacement pattern";
+    return map;
+}
+
+std::shared_ptr<const DisplacementMap> load_texture(const PrintRegionConfig& config, std::string* error, bool reload_if_modified)
+{
+    return load_texture(config.fuzzy_skin_texture_pattern.value, config.fuzzy_skin_texture.value, error, reload_if_modified);
+}
+
+FuzzySkinConfig fuzzy_skin_config(const PrintRegionConfig& config, FuzzySkinType type, const Vec3d& object_size)
+{
+    return FuzzySkinConfig{type,
+                           scaled<coord_t>(config.fuzzy_skin_thickness.value),
+                           scaled<coord_t>(config.fuzzy_skin_point_distance.value),
+                           config.fuzzy_skin_first_layer,
+                           config.fuzzy_skin_noise_type,
+                           config.fuzzy_skin_scale,
+                           config.fuzzy_skin_octaves,
+                           config.fuzzy_skin_persistence,
+                           config.fuzzy_skin_mode,
+                           config.fuzzy_skin_texture.value,
+                           config.fuzzy_skin_texture_pattern.value,
+                           config.fuzzy_skin_noise_type.value == NoiseType::DisplacementMap ? texture_mapping(config, object_size)
+                                                                                           : TextureMapping()};
+}
+
+struct UVMeshCacheEntry
+{
+    std::time_t                   mtime = 0;
+    std::shared_ptr<const UVMesh> mesh;
+};
+
+static std::mutex                              g_uv_cache_mutex;
+static std::map<std::string, UVMeshCacheEntry> g_uv_cache;
+
+std::string uv_mesh_source(const std::string& configured, const std::string& volume_file, const std::string& object_file)
+{
+    if (!configured.empty())
+        return configured;
+    for (const std::string* file : { &volume_file, &object_file })
+        if (boost::algorithm::iends_with(*file, ".glb") || boost::algorithm::iends_with(*file, ".gltf") ||
+            boost::algorithm::iends_with(*file, ".obj"))
+            return *file;
+    return {};
+}
+
+std::shared_ptr<const UVMesh> load_uv_mesh(const std::string& path, std::string* error, bool reload_if_modified)
+{
+    auto fail = [error](const std::string& msg) -> std::shared_ptr<const UVMesh> {
+        if (error)
+            *error = msg;
+        return nullptr;
+    };
+    if (path.empty())
+        return fail("the part was not loaded from a GLB, glTF or OBJ file with texture coordinates, and no UV mesh is set");
+
+    std::lock_guard<std::mutex> lock(g_uv_cache_mutex);
+    auto                        it = g_uv_cache.find(path);
+    if (it != g_uv_cache.end() && !reload_if_modified)
+        return it->second.mesh;
+
+    boost::system::error_code ec;
+    const std::time_t         mtime = boost::filesystem::last_write_time(boost::filesystem::path(path), ec);
+    if (ec)
+        return fail("cannot open \"" + path + "\"");
+    if (it != g_uv_cache.end() && it->second.mtime == mtime)
+        return it->second.mesh;
+
+    if (boost::algorithm::iends_with(path, ".glb") || boost::algorithm::iends_with(path, ".gltf")) {
+        // A glTF model: its triangles and texture coordinates as the importer reads them.
+        std::string                         why;
+        std::shared_ptr<const TexturedMesh> tm = load_textured_mesh(path, &why);
+        if (!tm)
+            return fail(why);
+        auto mesh = std::make_shared<UVMesh>();
+        for (const stl_vertex& v : tm->its.vertices)
+            mesh->vertices.emplace_back(v.cast<double>());
+        mesh->faces = tm->its.indices;
+        mesh->uvs.reserve(3 * tm->uvs.size());
+        for (const std::array<Vec2f, 3>& f : tm->uvs)
+            for (const Vec2f& uv : f)
+                mesh->uvs.emplace_back(uv.cast<double>());
+        mesh->min = mesh->max = mesh->vertices.front();
+        for (const Vec3d& v : mesh->vertices) {
+            mesh->min = mesh->min.cwiseMin(v);
+            mesh->max = mesh->max.cwiseMax(v);
+        }
+        g_uv_cache[path] = {mtime, mesh};
+        return mesh;
+    }
+
+    ObjParser::ObjData data;
+    if (!ObjParser::objparse(path.c_str(), data))
+        return fail("\"" + path + "\" is not a readable OBJ file");
+    const size_t n_coords = data.coordinates.size() / OBJ_VERTEX_LENGTH;
+    const size_t n_uvs    = data.textureCoordinates.size() / 2;
+    if (n_uvs == 0)
+        return fail("\"" + path + "\" has no texture coordinates");
+
+    auto mesh = std::make_shared<UVMesh>();
+    mesh->vertices.reserve(n_coords);
+    for (size_t i = 0; i < n_coords; ++i)
+        mesh->vertices.emplace_back(data.coordinates[i * OBJ_VERTEX_LENGTH], data.coordinates[i * OBJ_VERTEX_LENGTH + 1],
+                                    data.coordinates[i * OBJ_VERTEX_LENGTH + 2]);
+    // Faces are runs of corners ended by a corner with every index -1; split each into a fan.
+    std::vector<ObjParser::ObjVertex> face;
+    for (const ObjParser::ObjVertex& corner : data.vertices) {
+        if (corner.coordIdx != -1) {
+            face.push_back(corner);
+            continue;
+        }
+        for (size_t k = 2; k < face.size(); ++k) {
+            const ObjParser::ObjVertex* tri[3] = {&face[0], &face[k - 1], &face[k]};
+            bool                        valid  = true;
+            for (const ObjParser::ObjVertex* c : tri)
+                valid &= c->coordIdx >= 0 && size_t(c->coordIdx) < n_coords && c->textureCoordIdx >= 0 && size_t(c->textureCoordIdx) < n_uvs;
+            if (!valid)
+                continue;
+            mesh->faces.emplace_back(tri[0]->coordIdx, tri[1]->coordIdx, tri[2]->coordIdx);
+            for (const ObjParser::ObjVertex* c : tri)
+                mesh->uvs.emplace_back(data.textureCoordinates[2 * c->textureCoordIdx], data.textureCoordinates[2 * c->textureCoordIdx + 1]);
+        }
+        face.clear();
+    }
+    if (mesh->faces.empty())
+        return fail("\"" + path + "\" has no faces with texture coordinates");
+    mesh->min = mesh->max = mesh->vertices[mesh->faces.front()(0)];
+    for (const stl_triangle_vertex_indices& f : mesh->faces)
+        for (int k = 0; k < 3; ++k) {
+            mesh->min = mesh->min.cwiseMin(mesh->vertices[f(k)]);
+            mesh->max = mesh->max.cwiseMax(mesh->vertices[f(k)]);
+        }
+
+    g_uv_cache[path] = {mtime, mesh};
+    return mesh;
 }
 
 // Bilinear sample with wrap-around. u runs left to right and v bottom to top, one tile per unit.
@@ -199,29 +365,48 @@ double DisplacementMap::sample(double u, double v) const
 
 // Displacement in [-1, 1] at a wall point p (mm, object coordinates centred on the object's XY bounding box)
 // whose outward normal is n, at height z.
-double displacement_map_value(const DisplacementMap& map, FuzzySkinTextureProjection projection, double size, const Vec3d& p, const Vec3d& n)
+double displacement_map_value(const DisplacementMap& map, const TextureMapping& m, const Vec3d& p, const Vec3d& n)
 {
-    // Sides: tiles along the wall, v up. Tops and bottoms (normal more vertical than 45 degrees in the cylindrical
-    // projection, blended in by the normal in the box projection): seen from above or below, +Y up in the image.
-    const double tile_w   = size;
-    const double tile_h   = size * double(map.rows) / double(map.cols);
-    auto         top_down = [&](double nz) {
-        return map.sample((nz >= 0. ? p.x() : -p.x()) / tile_w + 0.5, p.y() / tile_h + 0.5);
+    // The UV and on the surface projections need the mesh, see SurfaceDisplacement.
+    if (m.projection == FuzzySkinTextureProjection::UV || m.projection == FuzzySkinTextureProjection::OnSurface)
+        return 0.;
+    const double tile_w = m.size;
+    const double tile_h = m.size * double(map.rows) / double(map.cols);
+    const double angle = m.rotation * M_PI / 180., c = std::cos(angle), s = std::sin(angle);
+    // (a, b): mm to the viewer's right and up in the plane the image is projected from. The image is turned
+    // counter-clockwise by the rotation, about a = b = 0. a = 0 is the middle of a tile; b = 0 its bottom edge, or with
+    // centred_v its middle.
+    auto at = [&](double a, double b, bool centred_v) {
+        const double ra = c * a + s * b, rb = -s * a + c * b;
+        return map.sample(ra / tile_w + 0.5, rb / tile_h + (centred_v ? 0.5 : 0.));
+    };
+    // Seen from above (or from below, mirrored so it is not), +Y up in the image.
+    auto top_down = [&](double nz) { return at(nz >= 0. ? p.x() : -p.x(), p.y(), true); };
+    // Around the vertical axis: counter-clockwise seen from above so the image is not mirrored, the middle of a tile
+    // facing the front (-Y) and a whole number of tiles once around, so the seam at the back closes.
+    auto around = [&]() {
+        const double turn = (std::atan2(p.y(), p.x()) + 0.5 * M_PI) / (2. * M_PI); // 0 at the front, -0.5 .. 0.5
+        return (turn - std::floor(turn + 0.5)) * double(tiles_around(m)) * tile_w;
     };
     double value;
-    if (projection == FuzzySkinTextureProjection::Cylindrical) {
-        if (std::abs(n.z()) > M_SQRT1_2) {
-            value = top_down(n.z());
-        } else {
-            // One turn around the object is one tile wide, counter-clockwise seen from above so the image is not mirrored.
-            // The middle of the image faces the front (-Y) and the seam is at the back. The tile is size high.
-            const double u = (std::atan2(p.y(), p.x()) + 0.5 * M_PI) / (2. * M_PI) + 0.5;
-            value          = map.sample(u, p.z() / size);
-        }
-    } else {
+    switch (m.projection) {
+    case FuzzySkinTextureProjection::Cylindrical:
+        value = std::abs(n.z()) > M_SQRT1_2 ? top_down(n.z()) : at(around(), p.z(), false);
+        break;
+    case FuzzySkinTextureProjection::Spherical: {
+        // Longitude as the cylindrical projection, latitude at the same scale as the equator, the equator through the
+        // object's middle height across the middle of a tile.
+        const double equator_radius = double(tiles_around(m)) * tile_w / (2. * M_PI);
+        const double latitude       = std::atan2(p.z() - m.center_z, std::hypot(p.x(), p.y()));
+        value                       = at(around(), latitude * equator_radius, true);
+        break;
+    }
+    case FuzzySkinTextureProjection::PlanarTop: value = at(p.x(), p.y(), true); break;
+    case FuzzySkinTextureProjection::PlanarFront: value = at(p.x(), p.z(), false); break;
+    case FuzzySkinTextureProjection::PlanarSide: value = at(p.y(), p.z(), false); break;
+    default: {
         // Box: project from +-X, +-Y and +-Z, with u running to the viewer's right on every side, and blend by the normal.
         // The middle of a tile is on the object's centre line, so an image one side wide sits centred on that side.
-        const double v  = p.z() / tile_h;
         double       wx = std::pow(n.x(), 4.), wy = std::pow(n.y(), 4.), wz = std::pow(n.z(), 4.);
         const double sum = wx + wy + wz;
         wx /= sum;
@@ -229,25 +414,26 @@ double displacement_map_value(const DisplacementMap& map, FuzzySkinTextureProjec
         wz /= sum;
         value = 0.;
         if (wx > 1e-4)
-            value += wx * map.sample((n.x() >= 0. ? p.y() : -p.y()) / tile_w + 0.5, v);
+            value += wx * at(n.x() >= 0. ? p.y() : -p.y(), p.z(), false);
         if (wy > 1e-4)
-            value += wy * map.sample((n.y() >= 0. ? -p.x() : p.x()) / tile_w + 0.5, v);
+            value += wy * at(n.y() >= 0. ? -p.x() : p.x(), p.z(), false);
         if (wz > 1e-4)
             value += wz * top_down(n.z());
     }
-    return value * 2. - 1.;
+    }
+    return signed_height(m, value);
 }
 
 // Walls: a point of a layer at height z whose outward normal n is horizontal.
 static double displacement_map_value(const DisplacementMap& map, const FuzzySkinConfig& cfg, const Vec2d& p, const Vec2d& n, double z)
 {
-    return displacement_map_value(map, cfg.texture_projection, cfg.texture_size, Vec3d(p.x(), p.y(), z), Vec3d(n.x(), n.y(), 0.));
+    return displacement_map_value(map, cfg.texture_mapping, Vec3d(p.x(), p.y(), z), Vec3d(n.x(), n.y(), 0.));
 }
 
 static std::shared_ptr<const DisplacementMap> get_displacement_map(const FuzzySkinConfig& cfg)
 {
     std::string error;
-    auto        map = load_displacement_map(cfg.texture, &error, false);
+    auto        map = load_texture(cfg.texture_pattern, cfg.texture, &error, false);
     if (!map)
         throw Slic3r::SlicingError("Fuzzy skin displacement map: " + error);
     return map;
@@ -396,19 +582,11 @@ void group_region_by_fuzzify(PerimeterGenerator& g)
     std::unordered_map<FuzzySkinConfig, SurfacesPtr> regions;
     for (auto region : *g.compatible_regions) {
         const auto&           region_config = region->region().config();
-        // A displacement map on the whole surface is already in the slices; the walls are not moved again.
-        const FuzzySkinConfig cfg{uses_surface_displacement(region_config) ? FuzzySkinType::None : region_config.fuzzy_skin.value,
-                                  scaled<coord_t>(region_config.fuzzy_skin_thickness.value),
-                                  scaled<coord_t>(region_config.fuzzy_skin_point_distance.value),
-                                  region_config.fuzzy_skin_first_layer,
-                                  region_config.fuzzy_skin_noise_type,
-                                  region_config.fuzzy_skin_scale,
-                                  region_config.fuzzy_skin_octaves,
-                                  region_config.fuzzy_skin_persistence,
-                                  region_config.fuzzy_skin_mode,
-                                  region_config.fuzzy_skin_texture.value,
-                                  region_config.fuzzy_skin_texture_projection,
-                                  region_config.fuzzy_skin_texture_size};
+        // A displacement map is already in the slices (whole surface or per layer); the walls are not moved again.
+        const FuzzySkinConfig cfg = fuzzy_skin_config(region_config,
+                                                      uses_surface_displacement(region_config) ? FuzzySkinType::None :
+                                                                                                 region_config.fuzzy_skin.value,
+                                                      unscale(region->layer()->object()->size()));
         auto&                 surfaces = regions[cfg];
         for (const auto& surface : region->slices.surfaces) {
             surfaces.push_back(&surface);
@@ -455,27 +633,16 @@ bool displaced_outline(const Layer& layer, ExPolygons& out)
     const PrintRegionConfig* found = nullptr;
     for (const LayerRegion* layerm : layer.regions()) {
         const PrintRegionConfig& rc = layerm->region().config();
-        // With the whole surface displaced, the layer's slices already carry the texture.
+        // A displacement map applied while slicing (whole surface or per layer) is already in the layer's slices.
         if (rc.fuzzy_skin.value != FuzzySkinType::None && rc.fuzzy_skin_noise_type.value == NoiseType::DisplacementMap &&
-            !rc.fuzzy_skin_texture_surface.value && !layerm->slices.empty()) {
+            !uses_surface_displacement(rc) && !layerm->slices.empty()) {
             found = &rc;
             break;
         }
     }
     if (found == nullptr)
         return false;
-    const FuzzySkinConfig cfg{found->fuzzy_skin,
-                              scaled<coord_t>(found->fuzzy_skin_thickness.value),
-                              scaled<coord_t>(found->fuzzy_skin_point_distance.value),
-                              found->fuzzy_skin_first_layer,
-                              found->fuzzy_skin_noise_type,
-                              found->fuzzy_skin_scale,
-                              found->fuzzy_skin_octaves,
-                              found->fuzzy_skin_persistence,
-                              found->fuzzy_skin_mode,
-                              found->fuzzy_skin_texture.value,
-                              found->fuzzy_skin_texture_projection,
-                              found->fuzzy_skin_texture_size};
+    const FuzzySkinConfig cfg = fuzzy_skin_config(*found, found->fuzzy_skin.value, unscale(layer.object()->size()));
     if (cfg.thickness <= 0 || cfg.point_distance <= 0)
         return false;
 

@@ -755,6 +755,10 @@ public:
     bool can_set_instance_to_object() const;
     bool can_fix_through_netfabb() const;
     bool can_simplify() const;
+    bool can_apply_normal_map_relief() const;
+    // Turn the normal map of .glb / .obj models into the displacement map over the whole surface. With ask, the user
+    // confirms first.
+    void apply_normal_map_relief(const std::vector<size_t>& obj_idxs, bool ask);
     bool can_smooth_mesh() const;
     bool can_split_to_objects() const;
     bool can_split_to_volumes() const;

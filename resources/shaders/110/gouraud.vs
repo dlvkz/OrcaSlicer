@@ -40,6 +40,7 @@ uniform vec4 color_clip_plane;
 
 attribute vec3 v_position;
 attribute vec3 v_normal;
+attribute vec2 v_tex_coord;
 
 // x = diffuse, y = specular;
 varying vec2 intensity;
@@ -50,6 +51,9 @@ varying float color_clip_plane_dot;
 varying vec4 world_pos;
 varying float world_normal_z;
 varying vec3 eye_normal;
+varying vec3 eye_position;
+varying vec3 world_normal;
+varying vec2 tex_coord;
 
 void main()
 {
@@ -74,6 +78,9 @@ void main()
     // z component of normal vector in world coordinate used for slope shading
     world_normal_z = slope.actived ? (normalize(slope.volume_world_normal_matrix * v_normal)).z : 0.0;
 
+    eye_position = position.xyz;
+    world_normal = mat3(volume_world_matrix) * v_normal;
+    tex_coord = v_tex_coord;
     gl_Position = projection_matrix * position;
     // Fill in the scalars for fragment shader clipping. Fragments with any of these components lower than zero are discarded.
     clipping_planes_dots = vec3(dot(world_pos, clipping_plane), world_pos.z - z_range.x, z_range.y - world_pos.z);

@@ -9,6 +9,7 @@
 #include <boost/nowide/fstream.hpp>
 #include <GL/glew.h>
 #include <cassert>
+#include <iterator>
 
 #include <boost/log/trivial.hpp>
 
@@ -52,6 +53,25 @@ bool GLShaderProgram::init_from_files(const std::string& name, const ShaderFilen
             return std::string();
         }
         s.close();
+
+        // Lines '#include "name"' are replaced by the file of that name next to this one, for code shared by several
+        // shaders. Included files may include others.
+        int includes = 0;
+        for (size_t pos = source.find("#include \""); pos != std::string::npos && includes < 64; pos = source.find("#include \"", pos), ++includes) {
+            const size_t name_begin = pos + 10, name_end = source.find('"', name_begin);
+            if (name_end == std::string::npos)
+                break;
+            const size_t      slash = filename.find_last_of('/');
+            const std::string inc   = resources_dir() + "/shaders/" + (slash == std::string::npos ? std::string() : filename.substr(0, slash + 1)) +
+                                    source.substr(name_begin, name_end - name_begin);
+            boost::nowide::ifstream f(inc, boost::nowide::ifstream::binary);
+            if (!f.good()) {
+                BOOST_LOG_TRIVIAL(error) << "Couldn't open file: '" << inc << "'";
+                return std::string();
+            }
+            const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+            source.replace(pos, name_end + 1 - pos, text);
+        }
 
         if (! defs.empty()) {
             // Extract the version and flip the order of "defines" and version in the source block.

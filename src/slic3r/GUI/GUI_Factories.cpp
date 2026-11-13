@@ -1360,6 +1360,7 @@ void MenuFactory::create_extra_object_menu()
     append_menu_item_fix_through_netfabb(&m_object_menu);
     // Object Simplify
     append_menu_item_simplify(&m_object_menu);
+    append_menu_item_normal_map_relief(&m_object_menu);
     // ObjectMesh Subdivision
     append_menu_item_smooth_mesh(&m_object_menu);
     // merge to single part
@@ -1982,6 +1983,18 @@ void MenuFactory::append_menu_item_clone(wxMenu* menu)
         []() {
             return true;
         }, m_parent);
+}
+
+void MenuFactory::append_menu_item_normal_map_relief(wxMenu* menu)
+{
+    append_menu_item(menu, wxID_ANY, _L("Surface texture from normal map"),
+        _L("Turn the model's normal map into a displacement map over the whole surface"),
+        [](wxCommandEvent&) {
+            const int idx = obj_list()->get_selected_obj_idx();
+            if (idx >= 0)
+                plater()->apply_normal_map_relief({size_t(idx)}, true);
+        }, "", menu,
+        []() { return plater()->can_apply_normal_map_relief(); }, m_parent);
 }
 
 void MenuFactory::append_menu_item_simplify(wxMenu* menu)

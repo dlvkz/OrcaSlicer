@@ -546,10 +546,10 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
     
     bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
     if (config->opt_enum<FuzzySkinMode>("fuzzy_skin_mode") != FuzzySkinMode::Displacement && !have_arachne) {
-        wxString msg_text = _(L("Both [Extrusion] and [Combined] modes of Fuzzy Skin require the Arachne Wall Generator to be enabled."));
+        wxString msg_text = _(L("The [Vary the flow] and [Both] surface texture methods require the Arachne Wall Generator to be enabled."));
         msg_text += "\n\n" + _(L("Change these settings automatically?\n"
                                     "Yes - Enable Arachne Wall Generator\n"
-                                    "No  - Disable Arachne Wall Generator and set [Displacement] mode of the Fuzzy Skin"));
+                                    "No  - Disable Arachne Wall Generator and set the surface texture method to [Move the nozzle]"));
         MessageDialog dialog(m_msg_dlg_parent, msg_text, "", wxICON_WARNING | wxYES | wxNO);
         DynamicPrintConfig new_conf = *config;
         is_msg_dlg_already_exist = true;
@@ -891,8 +891,23 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
     const bool fuzzy_skin_is_map = fuzzy_skin_noise_type == NoiseType::DisplacementMap;
     toggle_line("fuzzy_skin_scale", fuzzy_skin_noise_type != NoiseType::Classic && !fuzzy_skin_is_map);
     toggle_line("fuzzy_skin_octaves", fuzzy_skin_noise_type != NoiseType::Classic && fuzzy_skin_noise_type != NoiseType::Voronoi && !fuzzy_skin_is_map);
-    for (auto el : {"fuzzy_skin_texture", "fuzzy_skin_texture_projection", "fuzzy_skin_texture_size", "fuzzy_skin_texture_surface"})
+    for (auto el : {"fuzzy_skin_texture_pattern", "fuzzy_skin_texture_projection", "fuzzy_skin_texture_surface", "fuzzy_skin_texture_invert",
+                    "fuzzy_skin_texture_offset"})
         toggle_line(el, fuzzy_skin_is_map);
+    toggle_line("fuzzy_skin_texture", fuzzy_skin_is_map &&
+                                          config->opt_enum<FuzzySkinTexturePattern>("fuzzy_skin_texture_pattern") == FuzzySkinTexturePattern::Image);
+    const bool fuzzy_skin_uv = fuzzy_skin_is_map &&
+                               config->opt_enum<FuzzySkinTextureProjection>("fuzzy_skin_texture_projection") == FuzzySkinTextureProjection::UV;
+    toggle_line("fuzzy_skin_texture_size", fuzzy_skin_is_map && !fuzzy_skin_uv);
+    const bool fuzzy_skin_on_surface = fuzzy_skin_is_map && config->opt_enum<FuzzySkinTextureProjection>("fuzzy_skin_texture_projection") ==
+                                                                  FuzzySkinTextureProjection::OnSurface;
+    // On the surface, the cell patterns have no direction; images and stripes (laid by charts) do.
+    const auto fuzzy_skin_pattern = config->opt_enum<FuzzySkinTexturePattern>("fuzzy_skin_texture_pattern");
+    const bool fuzzy_skin_cells   = fuzzy_skin_pattern == FuzzySkinTexturePattern::Hexagons || fuzzy_skin_pattern == FuzzySkinTexturePattern::Bumps ||
+                                  fuzzy_skin_pattern == FuzzySkinTexturePattern::Stone || fuzzy_skin_pattern == FuzzySkinTexturePattern::Noise;
+    toggle_line("fuzzy_skin_texture_rotation", fuzzy_skin_is_map && !fuzzy_skin_uv && !(fuzzy_skin_on_surface && fuzzy_skin_cells));
+    toggle_line("fuzzy_skin_texture_uv_mesh", fuzzy_skin_uv);
+    toggle_line("fuzzy_skin_texture_smooth_support", fuzzy_skin_is_map && config->opt_bool("fuzzy_skin_texture_surface"));
     toggle_line("fuzzy_skin_persistence", fuzzy_skin_noise_type == NoiseType::Perlin || fuzzy_skin_noise_type == NoiseType::Billow);
 
     bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;

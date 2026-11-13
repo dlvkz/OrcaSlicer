@@ -89,6 +89,8 @@
 #include "libslic3r/Format/bbs_3mf.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/Format/TexturedMesh.hpp"
+#include "libslic3r/TextureRelief.hpp"
 #include "libslic3r/SLA/Hollowing.hpp"
 #include "libslic3r/SLA/SupportPoint.hpp"
 #include "libslic3r/SLA/ReprojectPointsOnMesh.hpp"
@@ -10787,6 +10789,9 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     m_is_dark = wxGetApp().app_config->get("dark_color_mode") == "1";
 
     m_aui_mgr.SetManagedWindow(q);
+    // Resize the sidebar live: the outline wxAUI otherwise draws while dragging is drawn on the screen and lands on the
+    // wrong monitor when monitors have different scaling.
+    m_aui_mgr.SetFlags(m_aui_mgr.GetFlags() | wxAUI_MGR_LIVE_RESIZE);
     m_aui_mgr.SetDockSizeConstraint(1, 1);
     //m_aui_mgr.GetArtProvider()->SetMetric(wxAUI_DOCKART_PANE_BORDER_SIZE, 0);
     //m_aui_mgr.GetArtProvider()->SetMetric(wxAUI_DOCKART_SASH_SIZE, 2);
@@ -12696,6 +12701,16 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
     GLGizmoSimplify::add_simplify_suggestion_notification(
         obj_idxs, model.objects, *notification_manager);
+
+    // Models with a normal map: offer its relief as the surface texture, once they are on the plate.
+    {
+        std::vector<size_t> with_normals;
+        for (size_t idx : obj_idxs)
+            if (idx < model.objects.size() && is_textured_model_file(model.objects[idx]->input_file) && has_normal_map(*model.objects[idx]))
+                with_normals.push_back(idx);
+        if (!with_normals.empty())
+            wxGetApp().CallAfter([with_normals]() { wxGetApp().plater()->apply_normal_map_relief(with_normals, true); });
+    }
 
     //set designer_model_id
     q->model().stl_design_id = designer_model_id;
@@ -19851,7 +19866,7 @@ void ProjectDropDialog::on_dpi_changed(const wxRect& suggested_rect)
 //BBS: remove GCodeViewer as seperate APP logic
 bool Plater::load_files(const wxArrayString& filenames)
 {
-    const std::regex pattern_drop(".*[.](stp|step|stl|oltp|obj|amf|3mf|svg|zip)", std::regex::icase);
+    const std::regex pattern_drop(".*[.](stp|step|stl|oltp|obj|glb|gltf|amf|3mf|svg|zip)", std::regex::icase);
     const std::regex pattern_gcode_drop(".*[.](gcode|g)", std::regex::icase);
 
     std::vector<fs::path> normal_paths;
@@ -24939,6 +24954,49 @@ bool Plater::can_decrease_instances() const { return p->can_decrease_instances()
 bool Plater::can_set_instance_to_object() const { return p->can_set_instance_to_object(); }
 bool Plater::can_fix_through_netfabb() const { return p->can_fix_through_netfabb(); }
 bool Plater::can_simplify() const { return p->can_simplify(); }
+bool Plater::can_apply_normal_map_relief() const
+{
+    const int idx = p->get_selected_object_idx();
+    return idx >= 0 && size_t(idx) < p->model.objects.size() && has_normal_map(*p->model.objects[size_t(idx)]);
+}
+
+void Plater::apply_normal_map_relief(const std::vector<size_t>& obj_idxs, bool ask)
+{
+    std::vector<size_t> idxs;
+    for (size_t idx : obj_idxs)
+        if (idx < p->model.objects.size() && has_normal_map(*p->model.objects[idx]))
+            idxs.push_back(idx);
+    if (idxs.empty())
+        return;
+    if (ask &&
+        MessageDialog(this,
+                      _L("The model has a normal map. Turn it into a surface texture (displacement map)?") + "\n\n" +
+                          _L("The relief uses the model's current size, so scale it to its print size first. "
+                             "This can be done again from the object's right-click menu."),
+                      _L("Surface texture from normal map"), wxYES_NO | wxICON_QUESTION)
+                .ShowModal() != wxID_YES)
+        return;
+
+    Plater::TakeSnapshot snapshot(this, "Surface texture from normal map");
+    wxBusyCursor         busy;
+    wxString             summary;
+    std::vector<size_t>  changed;
+    for (size_t idx : idxs) {
+        TextureReliefReport report;
+        std::string         error;
+        ModelObject*        object = p->model.objects[idx];
+        if (Slic3r::apply_normal_map_relief(*object, TextureReliefParams(), report, error)) {
+            summary += from_u8(object->name) + ": " + from_u8(report.summary()) + "\n";
+            changed.push_back(idx);
+            if (ObjectDataViewModel* list_model = sidebar().obj_list()->GetModel())
+                sidebar().obj_list()->add_settings_item(list_model->GetItemById(int(idx)), &object->config.get());
+        } else
+            summary += from_u8(object->name) + ": " + from_u8(error) + "\n";
+    }
+    if (!changed.empty())
+        changed_objects(changed);
+    MessageDialog(this, summary, _L("Surface texture from normal map"), wxOK | wxICON_INFORMATION).ShowModal();
+}
 bool Plater::can_smooth_mesh() const { return p->can_smooth_mesh(); }
 bool Plater::can_split_to_objects() const { return p->can_split_to_objects(); }
 bool Plater::can_split_to_volumes() const { return p->can_split_to_volumes(); }

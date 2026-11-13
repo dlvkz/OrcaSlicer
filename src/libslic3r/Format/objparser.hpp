@@ -46,6 +46,7 @@ struct ObjNewMtl
     std::array<float, 3>  Ks;
     std::array<float, 3>  Ke;
     std::string           map_Kd;//defalut png
+    std::string           map_Bump; // normal map (norm, bump or map_Bump)
 };
 
 inline bool operator==(const ObjUseMtl &v1, const ObjUseMtl &v2)

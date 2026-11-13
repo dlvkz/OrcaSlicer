@@ -1648,6 +1648,9 @@ GLCanvas3D::~GLCanvas3D()
     if (contextCurrent && m_sceneCacheResources.framebuffer != 0)
         ReleaseSceneCacheResources();
 
+    if (contextCurrent)
+        m_displacement_preview.release();
+
     const bool hasSelectionHighlightResources =
         m_selectionHighlightResources.fullResolutionMaskFramebuffer != 0 ||
         m_selectionHighlightResources.fullResolutionMaskTexture != 0 ||
@@ -3194,6 +3197,10 @@ void GLCanvas3D::render(bool only_init, bool overlayOnly)
             fullSceneRefresh = true;
         }
     }
+    // Fuzzy skin displacement maps shown on the models; a changed setting or slider changes the scene image.
+    if (m_canvas_type == ECanvasType::CanvasView3D && m_model != nullptr &&
+        m_displacement_preview.update(m_volumes, *m_model, wxGetApp().preset_bundle->prints.get_edited_preset().config))
+        fullSceneRefresh = true;
 
     const bool isRectanglePicking = m_rectangle_selection.is_dragging();
     const bool isRegularPicking = !m_mouse.dragging && m_mouse.position != Vec2d(DBL_MAX, DBL_MAX) && !m_gizmos.is_dragging();
@@ -5493,7 +5500,14 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         // ignore left up events coming from imgui windows and not processed by them
         m_mouse.ignore_left_up = true;
     m_tooltip.set_in_imgui(false);
-    if (imgui->update_mouse_data(evt)) {
+    // While a displacement panel slider is held, every mouse event is the slider's, even one ImGui lets through: a
+    // single one reaching the canvas starts a camera drag that then takes all the rest. Events over the panel are its
+    // own too, unless the canvas is already dragging (a camera drag that crosses the panel).
+    const bool panel_drag = m_displacement_preview.dragging() ||
+                            (!m_mouse.dragging && !evt.Leaving() && m_displacement_preview.panel_contains(float(pos.x()), float(pos.y())));
+    if (imgui->update_mouse_data(evt) || panel_drag) {
+        if (panel_drag && !imgui->want_mouse())
+            imgui->new_frame();
         if ((evt.LeftDown() || (evt.Moving() && (evt.AltDown() || evt.ShiftDown()))) && m_canvas != nullptr)
             m_canvas->SetFocus();
         m_mouse.position = evt.Leaving() ? Vec2d(-1.0, -1.0) : pos.cast<double>();
@@ -5509,7 +5523,7 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             m_dirty = true;
         // do not return if dragging or tooltip not empty to allow for tooltip update
         // also, do not return if the mouse is moving and also is inside MM gizmo to allow update seed fill selection
-        if (!m_mouse.dragging && m_tooltip.is_empty() && (m_gizmos.get_current_type() != GLGizmosManager::MmSegmentation || !evt.Moving()))
+        if (panel_drag || (!m_mouse.dragging && m_tooltip.is_empty() && (m_gizmos.get_current_type() != GLGizmosManager::MmSegmentation || !evt.Moving())))
             return;
     }
 
@@ -10032,6 +10046,11 @@ void GLCanvas3D::_render_overlays()
     //BBS: GUI refactor: GLToolbar
     //move gizmos behind of main
     _render_gizmos_overlay();
+
+    if (m_canvas_type == ECanvasType::CanvasView3D && m_gizmos.get_current_type() == GLGizmosManager::Undefined)
+        m_displacement_preview.render_panel(*this);
+    else
+        m_displacement_preview.hide_panel();
 
     if (m_layers_editing.last_object_id >= 0 && m_layers_editing.object_max_z() > 0.0f)
         m_layers_editing.render_overlay(*this);

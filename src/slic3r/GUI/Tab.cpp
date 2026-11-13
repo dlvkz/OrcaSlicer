@@ -1,12 +1,14 @@
 // #include "libslic3r/GCodeSender.hpp"
 //#include "slic3r/Utils/Serial.hpp"
 #include "Tab.hpp"
+#include "TextToHeightDialog.hpp"
 #include "PresetHints.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PresetFlowVariant.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/TextToHeight.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "WipeTowerDialog.hpp"
 
@@ -2705,6 +2707,7 @@ void TabPrint::build()
 
         optgroup = page->new_optgroup(L("Precision"), L"param_precision");
         optgroup->append_single_option_line("slice_closing_radius", "quality_settings_precision#slice-gap-closing-radius");
+        optgroup->append_single_option_line("open_surface_thickness", "quality_settings_precision#open-surface-thickness");
         optgroup->append_single_option_line("resolution", "quality_settings_precision#resolution");
         optgroup->append_single_option_line("enable_arc_fitting", "quality_settings_precision#arc-fitting");
         optgroup->append_single_option_line("xy_hole_compensation", "quality_settings_precision#x-y-compensation");
@@ -3068,20 +3071,85 @@ optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops"
 
         optgroup->append_single_option_line("timelapse_type", "others_settings_special_mode#timelapse");
 
-        optgroup = page->new_optgroup(L("Fuzzy Skin"), L"fuzzy_skin");
+        // Fuzzy skin grew into general surface texturing (noise, built-in patterns, images): the settings keep their
+        // fuzzy_skin_* keys, the page shows them as "Surface texture", with the displacement map settings in a group of
+        // their own that is only shown for that texture type.
+        optgroup = page->new_optgroup(L("Surface texture"), L"fuzzy_skin");
         optgroup->append_single_option_line("fuzzy_skin", "others_settings_fuzzy_skin");
-        optgroup->append_single_option_line("fuzzy_skin_mode", "others_settings_fuzzy_skin#fuzzy-skin-mode");
         optgroup->append_single_option_line("fuzzy_skin_noise_type", "others_settings_fuzzy_skin#noise-type");
-        optgroup->append_single_option_line("fuzzy_skin_point_distance", "others_settings_fuzzy_skin#point-distance");
         optgroup->append_single_option_line("fuzzy_skin_thickness", "others_settings_fuzzy_skin#skin-thickness");
+        optgroup->append_single_option_line("fuzzy_skin_point_distance", "others_settings_fuzzy_skin#point-distance");
+        optgroup->append_single_option_line("fuzzy_skin_mode", "others_settings_fuzzy_skin#fuzzy-skin-mode");
         optgroup->append_single_option_line("fuzzy_skin_scale", "others_settings_fuzzy_skin#skin-feature-size");
         optgroup->append_single_option_line("fuzzy_skin_octaves", "others_settings_fuzzy_skin#skin-noise-octaves");
         optgroup->append_single_option_line("fuzzy_skin_persistence", "others_settings_fuzzy_skin#skin-noise-persistence");
-        optgroup->append_single_option_line("fuzzy_skin_texture", "others_settings_fuzzy_skin#displacement-map");
-        optgroup->append_single_option_line("fuzzy_skin_texture_projection", "others_settings_fuzzy_skin#displacement-map");
-        optgroup->append_single_option_line("fuzzy_skin_texture_size", "others_settings_fuzzy_skin#displacement-map");
-        optgroup->append_single_option_line("fuzzy_skin_texture_surface", "others_settings_fuzzy_skin#displacement-map");
         optgroup->append_single_option_line("fuzzy_skin_first_layer", "others_settings_fuzzy_skin#apply-fuzzy-skin-to-first-layer");
+
+        optgroup = page->new_optgroup(L("Displacement map"), L"fuzzy_skin");
+        {
+            // Making a map from a description gets a button of its own on the pattern's line, so it is in sight whenever the
+            // displacement map settings are; it switches the pattern to an image.
+            Line line = optgroup->create_single_option_line("fuzzy_skin_texture_pattern", "others_settings_fuzzy_skin#displacement-map");
+            if (TextToHeight::available())
+                line.append_widget([this](wxWindow* parent) {
+                    Button* btn = new Button(parent, _L("From text") + dots);
+                    btn->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
+                    btn->SetToolTip(_L("Generate a seamless displacement map from a description, locally"));
+                    auto sizer = new wxBoxSizer(wxHORIZONTAL);
+                    sizer->Add(btn, 0, wxALIGN_CENTER_VERTICAL);
+                    btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+                        TextToHeightDialog dlg(this);
+                        if (dlg.ShowModal() != wxID_OK || dlg.height_map_path().empty())
+                            return;
+                        // Forward slashes: string options un-escape backslashes when a project is loaded again.
+                        std::string path = dlg.height_map_path();
+                        std::replace(path.begin(), path.end(), '\\', '/');
+                        load_key_value("fuzzy_skin_texture_pattern", int(FuzzySkinTexturePattern::Image));
+                        load_key_value("fuzzy_skin_texture", path);
+                        reload_config();
+                        update_changed_ui();
+                    });
+                    return sizer;
+                });
+            optgroup->append_line(line);
+        }
+        {
+            // The image path, with a small button to choose the file.
+            Line line = optgroup->create_single_option_line("fuzzy_skin_texture", "others_settings_fuzzy_skin#displacement-map");
+            line.append_widget([this](wxWindow* parent) {
+                Button* btn = new Button(parent, dots);
+                btn->SetStyle(ButtonStyle::Regular, ButtonType::Parameter);
+                btn->SetMinSize(FromDIP(wxSize(30, 26)));
+                btn->SetSize(FromDIP(wxSize(30, 26)));
+                btn->SetToolTip(_L("Choose an image file"));
+                auto sizer = new wxBoxSizer(wxHORIZONTAL);
+                sizer->Add(btn, 0, wxALIGN_CENTER_VERTICAL);
+                btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+                    wxFileDialog dlg(this, _L("Choose a displacement map image"), "", "",
+                                     _L("Images") + " (*.png;*.jpg;*.jpeg)|*.png;*.PNG;*.jpg;*.JPG;*.jpeg;*.JPEG",
+                                     wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+                    if (dlg.ShowModal() != wxID_OK)
+                        return;
+                    // Forward slashes: string options un-escape backslashes when a project is loaded again.
+                    std::string path = into_u8(dlg.GetPath());
+                    std::replace(path.begin(), path.end(), '\\', '/');
+                    load_key_value("fuzzy_skin_texture", path);
+                    if (Field* field = get_field("fuzzy_skin_texture"))
+                        field->set_value(from_u8(path), false);
+                    update_changed_ui();
+                });
+                return sizer;
+            });
+            optgroup->append_line(line);
+        }
+        optgroup->append_single_option_line("fuzzy_skin_texture_projection", "others_settings_fuzzy_skin#displacement-map");
+        optgroup->append_single_option_line("fuzzy_skin_texture_uv_mesh", "others_settings_fuzzy_skin#displacement-map");
+        optgroup->append_single_option_line("fuzzy_skin_texture_size", "others_settings_fuzzy_skin#displacement-map");
+        optgroup->append_single_option_line("fuzzy_skin_texture_rotation", "others_settings_fuzzy_skin#displacement-map");
+        optgroup->append_single_option_line("fuzzy_skin_texture_invert", "others_settings_fuzzy_skin#displacement-map");
+        optgroup->append_single_option_line("fuzzy_skin_texture_offset", "others_settings_fuzzy_skin#displacement-map");
+        optgroup->append_single_option_line("fuzzy_skin_texture_surface", "others_settings_fuzzy_skin#displacement-map");
+        optgroup->append_single_option_line("fuzzy_skin_texture_smooth_support", "others_settings_fuzzy_skin#displacement-map");
 
         optgroup = page->new_optgroup(L("G-code output"), L"param_gcode");
         optgroup->append_single_option_line("reduce_infill_retraction", "others_settings_g_code_output#reduce-infill-retraction");

@@ -136,9 +136,28 @@ CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(NoiseType)
 
 static t_config_enum_values s_keys_map_FuzzySkinTextureProjection {
     { "box",            int(FuzzySkinTextureProjection::Box) },
-    { "cylindrical",    int(FuzzySkinTextureProjection::Cylindrical) }
+    { "cylindrical",    int(FuzzySkinTextureProjection::Cylindrical) },
+    { "uv",             int(FuzzySkinTextureProjection::UV) },
+    { "planar_top",     int(FuzzySkinTextureProjection::PlanarTop) },
+    { "planar_front",   int(FuzzySkinTextureProjection::PlanarFront) },
+    { "planar_side",    int(FuzzySkinTextureProjection::PlanarSide) },
+    { "spherical",      int(FuzzySkinTextureProjection::Spherical) },
+    { "on_surface",     int(FuzzySkinTextureProjection::OnSurface) }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FuzzySkinTextureProjection)
+
+static t_config_enum_values s_keys_map_FuzzySkinTexturePattern {
+    { "image",          int(FuzzySkinTexturePattern::Image) },
+    { "knurl",          int(FuzzySkinTexturePattern::Knurl) },
+    { "hexagons",       int(FuzzySkinTexturePattern::Hexagons) },
+    { "bricks",         int(FuzzySkinTexturePattern::Bricks) },
+    { "ribs",           int(FuzzySkinTexturePattern::Ribs) },
+    { "waves",          int(FuzzySkinTexturePattern::Waves) },
+    { "bumps",          int(FuzzySkinTexturePattern::Bumps) },
+    { "stone",          int(FuzzySkinTexturePattern::Stone) },
+    { "noise",          int(FuzzySkinTexturePattern::Noise) }
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FuzzySkinTexturePattern)
 
 static t_config_enum_values s_keys_map_FuzzySkinMode {
     { "displacement",   int(FuzzySkinMode::Displacement) },
@@ -3072,10 +3091,11 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionInts{ -1 });
 
     def = this->add("fuzzy_skin", coEnum);
-    def->label = L("Fuzzy Skin");
+    def->label = L("Textured walls");
+    def->full_label = L("Surface texture (fuzzy skin)");
     def->category = L("Others");
-    def->tooltip = L("Randomly jitter while printing the wall, so that the surface has a rough look. This setting controls "
-                     "the fuzzy position.");
+    def->tooltip = L("Which walls get the surface texture: a random fuzzy skin, coherent noise, or a displacement map image or "
+                     "pattern (see \"Texture type\"). Painted fuzzy skin areas are textured whatever this is set to.");
     def->enum_keys_map = &ConfigOptionEnum<FuzzySkinType>::get_enum_values();
     def->enum_values.push_back("none");
     def->enum_values.push_back("external");
@@ -3089,9 +3109,11 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionEnum<FuzzySkinType>(FuzzySkinType::None));
 
     def = this->add("fuzzy_skin_thickness", coFloat);
-    def->label = L("Fuzzy skin thickness");
+    def->label = L("Texture depth");
+    def->full_label = L("Surface texture depth");
     def->category = L("Others");
-    def->tooltip = L("The width within which to jitter. It's advised to be below outer wall line width.");
+    def->tooltip = L("How far the texture moves the wall in and out (fuzzy skin thickness). It's advised to be below outer wall "
+                     "line width.");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->min = 0;
     def->max = 1;
@@ -3099,7 +3121,8 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(0.2));
 
     def = this->add("fuzzy_skin_point_distance", coFloat);
-    def->label = L("Fuzzy skin point distance");
+    def->label = L("Point distance");
+    def->full_label = L("Surface texture point distance");
     def->category = L("Others");
     def->tooltip = L("The average distance between the random points introduced on each line segment.");
     def->sidetext = "mm";	// milimeters, don't need translation
@@ -3109,22 +3132,24 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(0.3));
 
     def = this->add("fuzzy_skin_first_layer", coBool);
-    def->label = L("Apply fuzzy skin to first layer");
+    def->label = L("Texture the first layer");
+    def->full_label = L("Surface texture on the first layer");
     def->category = L("Others");
-    def->tooltip = L("Whether to apply fuzzy skin on the first layer.");
+    def->tooltip = L("Whether to texture the walls of the first layer too.");
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionBool(0));
 
     def = this->add("fuzzy_skin_mode", coEnum);
-    def->label = L("Fuzzy skin generator mode");
+    def->label = L("Texture method");
+    def->full_label = L("Surface texture method");
     def->category = L("Others");
     def->tooltip = L("Fuzzy skin generation mode. Works only with Arachne!\n"
-                     "Displacement: Сlassic mode when the pattern is formed by shifting the nozzle sideways from the original path.\n"
-                     "Extrusion: The mode when the pattern formed by the amount of extruded plastic. "
+                     "Move the nozzle (displacement): Сlassic mode when the pattern is formed by shifting the nozzle sideways from the original path.\n"
+                     "Vary the flow (extrusion): The mode when the pattern formed by the amount of extruded plastic. "
                      "This is the fast and straight algorithm without unnecessary nozzle shake that gives a smooth pattern. "
                      "But it is more useful for forming loose walls in the entire they array.\n"
-                     "Combined: Joint mode [Displacement] + [Extrusion]. The appearance of the walls is similar to [Displacement] Mode, but it leaves no pores between the perimeters.\n\n"
-                     "Attention! The [Extrusion] and [Combined] modes works only the fuzzy_skin_thickness parameter not more than the thickness of printed loop. "
+                     "Both (combined): Joint mode [Move the nozzle] + [Vary the flow]. The appearance of the walls is similar to [Move the nozzle] Mode, but it leaves no pores between the perimeters.\n\n"
+                     "Attention! The [Vary the flow] and [Both] modes works only the texture depth parameter not more than the thickness of printed loop. "
                      "At the same time, the width of the extrusion for a particular layer should also not be below a certain level. "
                      "It is usually equal 15-25%% of a layer height. Therefore, the maximum fuzzy skin thickness with a perimeter width of 0.4 mm and a layer height of 0.2 mm will be 0.4-(0.2*0.25)=±0.35mm! "
                      "If you enter a higher parameter than this, the error Flow::spacing() will displayed, and the model will not be sliced. You can choose this number until this error is repeated." );
@@ -3132,23 +3157,24 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("displacement");
     def->enum_values.push_back("extrusion");
     def->enum_values.push_back("combined");
-    def->enum_labels.push_back(L("Displacement"));
-    def->enum_labels.push_back(L("Extrusion"));
-    def->enum_labels.push_back(L("Combined"));
+    def->enum_labels.push_back(L("Move the nozzle"));
+    def->enum_labels.push_back(L("Vary the flow"));
+    def->enum_labels.push_back(L("Both"));
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionEnum<FuzzySkinMode>(FuzzySkinMode::Displacement));
 
     def = this->add("fuzzy_skin_noise_type", coEnum);
-    def->label = L("Fuzzy skin noise type");
+    def->label = L("Texture type");
+    def->full_label = L("Surface texture type");
     def->category = L("Others");
-    def->tooltip = L("Noise type to use for fuzzy skin generation:\n"
-                     "Classic: Classic uniform random noise.\n"
+    def->tooltip = L("What the surface texture is made of:\n"
+                     "Classic fuzzy skin: Classic uniform random noise.\n"
                      "Perlin: Perlin noise, which gives a more consistent texture.\n"
                      "Billow: Similar to perlin noise, but clumpier.\n"
                      "Ridged Multifractal: Ridged noise with sharp, jagged features. Creates marble-like textures.\n"
                      "Voronoi: Divides the surface into voronoi cells, and displaces each one by a random amount. Creates a patchwork texture.\n"
-                     "Displacement map: Displaces the walls by the brightness of a PNG image, like a displacement map in a renderer. "
-                     "White pushes the wall out by the skin thickness, black pulls it in by the same amount, and mid grey leaves it in place.");
+                     "Displacement map: Displaces the walls by the brightness of an image or of a built-in pattern, like a displacement map in a renderer. "
+                     "White pushes the wall out by the texture depth, black pulls it in by the same amount, and mid grey leaves it in place.");
     def->enum_keys_map = &ConfigOptionEnum<NoiseType>::get_enum_values();
     def->enum_values.push_back("classic");
     def->enum_values.push_back("perlin");
@@ -3156,7 +3182,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("ridgedmulti");
     def->enum_values.push_back("voronoi");
     def->enum_values.push_back("displacementmap");
-    def->enum_labels.push_back(L("Classic"));
+    def->enum_labels.push_back(L("Classic fuzzy skin"));
     def->enum_labels.push_back(L("Perlin"));
     def->enum_labels.push_back(L("Billow"));
     def->enum_labels.push_back(L("Ridged Multifractal"));
@@ -3166,7 +3192,8 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionEnum<NoiseType>(NoiseType::Classic));
 
     def = this->add("fuzzy_skin_scale", coFloat);
-    def->label = L("Fuzzy skin feature size");
+    def->label = L("Noise feature size");
+    def->full_label = L("Surface texture noise feature size");
     def->category = L("Others");
     def->tooltip = L("The base size of the coherent noise features, in mm. Higher values will result in larger features.");
     def->sidetext = "mm";	// milimeters, don't need translation
@@ -3176,7 +3203,8 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(1.0));
 
     def = this->add("fuzzy_skin_octaves", coInt);
-    def->label = L("Fuzzy Skin Noise Octaves");
+    def->label = L("Noise octaves");
+    def->full_label = L("Surface texture noise octaves");
     def->category = L("Others");
     def->tooltip = L("The number of octaves of coherent noise to use. Higher values increase the detail of the noise, but also increase computation time.");
     def->min = 1;
@@ -3185,7 +3213,8 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionInt(4));
 
     def = this->add("fuzzy_skin_persistence", coFloat);
-    def->label = L("Fuzzy skin noise persistence");
+    def->label = L("Noise persistence");
+    def->full_label = L("Surface texture noise persistence");
     def->category = L("Others");
     def->tooltip = L("The decay rate for higher octaves of the coherent noise. Lower values will result in smoother noise.");
     def->min = 0.01;
@@ -3193,34 +3222,144 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.5));
 
-    def = this->add("fuzzy_skin_texture", coString);
-    def->label = L("Displacement map");
+    def = this->add("fuzzy_skin_texture_pattern", coEnum);
+    def->label = L("Pattern");
+    def->full_label = L("Displacement map pattern");
     def->category = L("Others");
-    def->tooltip = L("Path to the PNG image used by the displacement map noise type. Grey, colour and 16 bit images are read; "
-                     "colour is turned into brightness and transparency is ignored.");
+    def->tooltip = L("What the displacement map displaces the surface by: an image of your own, or a pattern built into the slicer. "
+                     "Each pattern repeats seamlessly; the tile size sets the size of one repeat.\n"
+                     "Image: The image set in \"Image\" below.\n"
+                     "Knurl: Diamond knurling, like a tool grip.\n"
+                     "Hexagons: Raised hexagonal cells with grooves between them.\n"
+                     "Bricks: Bricks in running bond, twice as wide as high, with mortar grooves.\n"
+                     "Ribs: Rounded ribs running up the image.\n"
+                     "Waves: Wavy ridges running across the image.\n"
+                     "Bumps: A round bump in the middle of each repeat.\n"
+                     "Stone: Rounded stones of random shapes, like cobblestones.\n"
+                     "Noise: Irregular, natural grain, like stone or leather.");
+    def->enum_keys_map = &ConfigOptionEnum<FuzzySkinTexturePattern>::get_enum_values();
+    def->enum_values.push_back("image");
+    def->enum_values.push_back("knurl");
+    def->enum_values.push_back("hexagons");
+    def->enum_values.push_back("bricks");
+    def->enum_values.push_back("ribs");
+    def->enum_values.push_back("waves");
+    def->enum_values.push_back("bumps");
+    def->enum_values.push_back("stone");
+    def->enum_values.push_back("noise");
+    def->enum_labels.push_back(L("Image"));
+    def->enum_labels.push_back(L("Knurl"));
+    def->enum_labels.push_back(L("Hexagons"));
+    def->enum_labels.push_back(L("Bricks"));
+    def->enum_labels.push_back(L("Ribs"));
+    def->enum_labels.push_back(L("Waves"));
+    def->enum_labels.push_back(L("Bumps"));
+    def->enum_labels.push_back(L("Stone"));
+    def->enum_labels.push_back(L("Noise"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<FuzzySkinTexturePattern>(FuzzySkinTexturePattern::Image));
+
+    def = this->add("fuzzy_skin_texture", coString);
+    def->label = L("Image");
+    def->full_label = L("Displacement map image");
+    def->category = L("Others");
+    def->tooltip = L("Path to the image used by the displacement map texture type, a PNG or JPEG file. Grey, colour and 16 bit "
+                     "PNG images are read; colour is turned into brightness and transparency is ignored.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString(""));
 
     def = this->add("fuzzy_skin_texture_projection", coEnum);
-    def->label = L("Displacement map projection");
+    def->label = L("Projection");
+    def->full_label = L("Displacement map projection");
     def->category = L("Others");
-    def->tooltip = L("How the displacement map is wrapped onto the walls.\n"
-                     "Box: The image is projected from the four sides and blended where the wall turns, so it reads the right way round on every side.\n"
-                     "Cylindrical: The image is wrapped once around the vertical axis through the center of the object.");
+    def->tooltip = L("How the displacement map is wrapped onto the surface.\n"
+                     "Box (triplanar): The image is projected from the four sides, the top and the bottom, and blended by the "
+                     "surface's direction where it turns, so it reads the right way round on every side.\n"
+                     "Cylindrical: The image is wrapped around the vertical axis through the center of the object, repeated a "
+                     "whole number of times so it meets itself at the back. Tops and bottoms are seen from above.\n"
+                     "Spherical: The image is wrapped around the center of the object like a map around a globe, repeated a "
+                     "whole number of times around it.\n"
+                     "Planar (top, front, side): The image is projected straight through the object from one direction. "
+                     "Surfaces facing that direction show it best; surfaces along it stretch it into streaks.\n"
+                     "UV: The image is placed by the texture coordinates of the model the part was loaded from (OBJ, GLB or glTF), as a "
+                     "textured model maps its textures (or of the UV mesh, if one is set).\n"
+                     "On the surface: The pattern is laid out on the surface itself instead of projected, so it has no hard seams and is "
+                     "not stretched. Hexagons (a honeycomb laid along the surface), bumps and stone are cells that fold over edges and "
+                     "keep their size round narrow and wide parts; noise is 3D. Images and the striped patterns are projected by many "
+                     "small charts that follow the surface and continue into each other, round a cylinder by its arc length; where "
+                     "two runs of charts meet (the back of a round part) the image fades from one to the other.");
     def->enum_keys_map = &ConfigOptionEnum<FuzzySkinTextureProjection>::get_enum_values();
     def->enum_values.push_back("box");
     def->enum_values.push_back("cylindrical");
-    def->enum_labels.push_back(L("Box"));
+    def->enum_values.push_back("spherical");
+    def->enum_values.push_back("planar_top");
+    def->enum_values.push_back("planar_front");
+    def->enum_values.push_back("planar_side");
+    def->enum_values.push_back("uv");
+    def->enum_values.push_back("on_surface");
+    def->enum_labels.push_back(L("Box (triplanar)"));
     def->enum_labels.push_back(L("Cylindrical"));
+    def->enum_labels.push_back(L("Spherical"));
+    def->enum_labels.push_back(L("Planar from the top"));
+    def->enum_labels.push_back(L("Planar from the front"));
+    def->enum_labels.push_back(L("Planar from the side"));
+    def->enum_labels.push_back(L("UV"));
+    def->enum_labels.push_back(L("On the surface (seamless)"));
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<FuzzySkinTextureProjection>(FuzzySkinTextureProjection::Box));
 
-    def = this->add("fuzzy_skin_texture_size", coFloat);
-    def->label = L("Displacement map size");
+    def = this->add("fuzzy_skin_texture_rotation", coFloat);
+    def->label = L("Rotation");
+    def->full_label = L("Displacement map rotation");
     def->category = L("Others");
-    def->tooltip = L("Size of one tile of the displacement map, in mm, beyond which the image repeats. "
-                     "Box projection: the width of the image on the wall; its height follows the image's aspect ratio. "
-                     "Cylindrical projection: the height of the image; its width is stretched to one turn around the object.");
+    def->tooltip = L("Turns the image counter-clockwise, as seen on the surface, in degrees. Not used by the UV projection, nor by the hexagons, "
+                     "bumps, stone and noise patterns on the surface. "
+                     "With the cylindrical and spherical projections, angles other than 0 and 180 degrees may leave a seam at the back.");
+    def->sidetext = "°";	// degrees, don't need translation
+    def->min = -360;
+    def->max = 360;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
+
+    def = this->add("fuzzy_skin_texture_invert", coBool);
+    def->label = L("Invert");
+    def->full_label = L("Invert displacement map");
+    def->category = L("Others");
+    def->tooltip = L("Swap bumps and dents: black pushes the surface out and white pulls it in.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("fuzzy_skin_texture_offset", coFloat);
+    def->label = L("Offset");
+    def->full_label = L("Displacement map offset");
+    def->category = L("Others");
+    def->tooltip = L("Which way the map moves the surface. At 0 it only goes in (white stays on the surface), at 1 it only goes "
+                     "out (black stays on the surface), at 0.5 mid grey stays on the surface and the rest goes both ways. "
+                     "From black to white the surface always moves twice the texture depth.");
+    def->min = 0;
+    def->max = 1;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.5));
+
+    def = this->add("fuzzy_skin_texture_uv_mesh", coString);
+    def->label = L("UV mesh");
+    def->full_label = L("Displacement map UV mesh");
+    def->category = L("Others");
+    def->tooltip = L("For the UV projection. Leave it empty to use the texture coordinates of the file the part was loaded from "
+                     "(GLB, glTF or OBJ). Set it to use another OBJ, GLB or glTF file holding the same mesh with texture "
+                     "coordinates, for example the textured model a repaired or simplified part was made from. That file is "
+                     "fitted to the part by its bounding box, so it may be at another position or scale, but not rotated.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionString(""));
+
+    def = this->add("fuzzy_skin_texture_size", coFloat);
+    def->label = L("Tile size");
+    def->full_label = L("Displacement map tile size");
+    def->category = L("Others");
+    def->tooltip = L("Width of one tile of the displacement map, in mm, beyond which the image or pattern repeats. Its height "
+                     "follows the image's aspect ratio. The cylindrical and spherical projections round it so a whole number of "
+                     "tiles goes around the object: to wrap an image once around, set it to the object's circumference. With the on the surface "
+                     "projection: the spacing of the cells or bumps.");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->min = 0.1;
     def->max = 10000;
@@ -3234,9 +3373,20 @@ void PrintConfigDef::init_fff_params()
                      "tops and the undersides of overhangs. A bump on a top is printed on the layers above it, and a dent removes "
                      "material from the layers below. The face the object stands on stays flat. Walls, skins, overhangs and supports "
                      "all follow the textured shape.\n"
-                     "When off, only the walls chosen in Fuzzy Skin are moved sideways, layer by layer, which leaves tops flat.");
+                     "When off (per layer only): each layer's outline is moved sideways by the texture and nothing moves up or down, "
+                     "so tops and the undersides of overhangs stay flat. Every projection works. Slicing is faster, about as fast as "
+                     "ordinary fuzzy skin, as no material is added to or cut from tops and the layers stay simpler.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("fuzzy_skin_texture_smooth_support", coBool);
+    def->label = L("Supports ignore the texture");
+    def->category = L("Others");
+    def->tooltip = L("With \"Displace the whole surface\" and tree supports: decide where support is needed from the model without "
+                     "the texture. The texture's own small overhangs then get no supports of their own, and supports are generated "
+                     "faster. Supports still keep their distance from the textured surface.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("filter_out_gap_fill", coFloat);
     def->label = L("Filter out tiny gaps");
@@ -5466,6 +5616,20 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0.049));
+
+    def = this->add("open_surface_thickness", coFloat);
+    def->label = L("Open surface thickness");
+    def->full_label = L("Print open and paper-thin surfaces");
+    def->category = L("Quality");
+    def->tooltip = L("Generated and scanned models often have surfaces with no thickness (a cape, a single-sided wall) or holes "
+                     "too wide to close, and slicing drops them. Above 0, every outline that does not close is printed as a wall "
+                     "this thick, and closed outlines thinner than this are thickened to it. About two line widths prints them "
+                     "as two walls. Leave it at 0 for well-made models.");
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->min = 0;
+    def->max = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.));
 
     def = this->add("slicing_mode", coEnum);
     def->label = L("Slicing Mode");
@@ -9079,6 +9243,12 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->tooltip = L("metadata value list added into 3mf.");
     def->cli_params = "\"value1;value2;...\"";
     def->set_default_value(new ConfigOptionStrings());
+
+    def = this->add("relief_from_normal_map", coBool);
+    def->label = L("Surface texture from the normal map");
+    def->tooltip = L("Turn the normal map of .glb and .obj models into a displacement map over the whole surface.");
+    def->cli_params = "option";
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("allow_newer_file", coBool);
     def->label = L("Allow 3mf with newer version to be sliced");

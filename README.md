@@ -1,4 +1,101 @@
 
+# Snapmaker Orca with displacement maps
+
+This is a fork of [Snapmaker Orca](https://github.com/Snapmaker/OrcaSlicer). It adds **displacement maps**: a real surface texture
+from a built-in pattern, your own image, a model's normal map or a generated texture from a text description. The texture is applied while slicing. The mesh
+is never subdivided, so a 640-triangle cylinder can print a 0.4 mm knurl and the project stays a few kilobytes.
+
+The work is on the branch [`displacement-maps`](https://github.com/dlvkz/OrcaSlicer/tree/displacement-maps),
+which starts from Snapmaker Orca `main` (fd6e55e). This fork is not made or supported by Snapmaker. It has been built and tested on
+Windows only.
+
+![Built-in patterns, rendered from the sliced G-code](doc/images/displacement/gallery.jpg)
+
+## What it adds
+
+**In the settings** (Process → Others → **Surface texture**, set **Texture type** to **Displacement map**; or the **Displacement map**
+panel at the top left of the 3D view):
+
+- **Patterns**, no image needed: knurl, hexagons, bricks, ribs, waves, bumps, stone and noise. All tile seamlessly.
+- **Your own image**: PNG (8 or 16 bit, grey or colour) or JPEG. White pushes the surface out, black pulls it in.
+- **Generate from text**: describe a surface ("tree bark", "cobblestone pavement") and pick one of the seamless height maps it
+  makes. It runs locally with no upload, on your graphics card (Vulkan) or else on the processor. The model is an optional add-on
+  (about 0.93 GB) that the app downloads the first time you use it.
+- **Projections**: box (triplanar), cylindrical, spherical, planar (top, front, side), UV and **on the surface**.
+  - **UV** uses the model's own texture coordinates. When the part was loaded from a GLB, glTF or OBJ file, that file is used
+    automatically.
+  - **On the surface** lays the pattern out on the mesh itself instead of projecting a flat image. Honeycomb, bumps, stone and noise
+    are built as cells on the surface. Images and stripes are laid down in small overlapping patches along the surface.
+- **Tile size, rotation, invert and offset.** The offset works like Blender's midlevel: 0 cuts the texture into the surface, 1 raises
+  it out of the surface, and 0.5 goes both ways.
+- **Whole surface or per layer.** By default the texture goes on the shape itself, so tops, slopes and overhang undersides get it
+  too. "Per layer only" just moves each layer's outline sideways. That is faster, about as fast as ordinary fuzzy skin, and leaves
+  tops flat.
+- **Per object.** Each object can have its own texture. Select it, and the panel edits that object only.
+- **Normal map to relief.** When a GLB, glTF or OBJ model with a normal map is loaded, the slicer offers to turn the normal map into
+  a 16-bit height map and print it as relief through the model's UVs. This is also on the right-click menu and on the command line
+  (`--relief-from-normal-map`).
+
+**In the 3D view:**
+
+- **Live preview before slicing.** The model is displaced on the GPU by tessellation (OpenGL 4.0), so no high-polygon copy is made
+  and sliders update as you drag. On older OpenGL the texture is only shaded.
+- The **Displacement map** panel is always visible in this fork, out of convenience.
+
+**Slicing fixes and helpers that came out of this work:**
+
+- **Supports ignore the texture** (optional): tree supports are planned from the untextured shape, so they don't chase every bump.
+  Tree-support overhang detection is also faster.
+- **Open surface thickness** (Quality → Precision): prints zero-thickness sheets and paper-thin parts (capes, flags, leaves on
+  AI-generated models) as bands of the given width instead of dropping them.
+- **Deterministic slicing of broken meshes**: the same project now gives the same layers every time. Before, layers of meshes with
+  holes or non-manifold edges could differ from run to run.
+
+![In the editor: each object has its own texture, shown live before slicing](doc/images/displacement/gui_per_object.jpg)
+
+## Quick start
+
+1. Select an object. In the **Displacement map** panel, press **Use a displacement map**.
+2. Pick a **Pattern**, or **Image** and a file, or **Generate from text…**.
+3. Pick a **Projection** and a **Tile size**, then set the **Texture depth**. 0.3 to 0.6 mm reads well with a 0.4 mm nozzle.
+4. Slice.
+
+The full reference is in the [Surface texture / fuzzy skin page](doc/print_settings/others/others_settings_fuzzy_skin.md#displacement-map).
+
+## Measured
+
+A Ø40 × 40 mm cylinder with a PNG texture, sliced for the Snapmaker U1 with the same profile (slice time is the median of 3 runs):
+
+| | Project size | Slice time |
+|---|---|---|
+| 512-triangle cylinder + displacement map, whole surface | **0.022 MB** | 1.78 s |
+| same, per layer only | **0.022 MB** | **1.53 s** |
+| the same texture baked into a 1.26 M-triangle mesh | 15.1 MB | 4.95 s |
+
+The printed outer walls of the map and the baked mesh match to a median of 4.3 µm (95% of points within 26 µm).
+
+A map only saves space and time against heavy meshes. A model that is already light (tens of thousands of triangles) plus a 2048 ×
+2048 16-bit map is bigger and slower to slice than the model on its own.
+
+## Known limits
+
+- A flat image can't wrap a closed shape without a seam or stretching somewhere. **On the surface** avoids that, but where its
+  patches meet you can see a soft band, and on spheres some doubled lines.
+- glTF files with compressed geometry (EXT_meshopt, Draco) are refused with a clear message. `scripts/glb_unmeshopt.py` converts
+  meshopt files.
+- Fine, deep textures add print time.
+- Tested on Windows only.
+
+## Licence and credits
+
+AGPL-3.0, like Snapmaker Orca and OrcaSlicer. Generate from text is powered by Stability AI: SD-Turbo is used under the Stability AI
+Community License, with a copy and a NOTICE in the model folder. Normal maps from colour come from DeepBump by Hugo Tini (GPL-3.0),
+and fast decoding from TAESD by Ollin Boer Bohan (MIT).
+
+The original Snapmaker Orca README follows.
+
+---
+
 <h1> <p "font-size:200px;"> Snapmaker Orca</p> </h1>
 
 [![Build all](https://github.com/Snapmaker/OrcaSlicer/actions/workflows/build_all.yml/badge.svg?branch=main)](https://github.com/Snapmaker/OrcaSlicer/actions/workflows/build_all.yml)

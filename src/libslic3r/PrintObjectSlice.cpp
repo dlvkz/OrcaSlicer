@@ -76,7 +76,8 @@ static std::vector<ExPolygons> slice_volume(
     const std::vector<float>      &zs,
     const MeshSlicingParamsEx     &params,
     const std::function<void()>   &throw_on_cancel_callback,
-    const Feature::FuzzySkin::SurfaceDisplacement *displacement = nullptr)
+    const Feature::FuzzySkin::SurfaceDisplacement *displacement = nullptr,
+    std::vector<ExPolygons>       *smooth = nullptr)
 {
     std::vector<ExPolygons> layers;
     if (! zs.empty()) {
@@ -90,6 +91,8 @@ static std::vector<ExPolygons> slice_volume(
             throw_on_cancel_callback();
             // A displacement map on the whole surface: correct the slices from the texture, as if it were modelled.
             if (displacement != nullptr) {
+                if (smooth != nullptr && displacement->smooth_support)
+                    *smooth = layers;
                 Feature::FuzzySkin::displace_slices(its, params2.trafo, zs, layers, *displacement, throw_on_cancel_callback);
                 throw_on_cancel_callback();
             }
@@ -106,13 +109,14 @@ static std::vector<ExPolygons> slice_volume(
     const std::vector<t_layer_height_range>     &ranges,
     const MeshSlicingParamsEx                   &params,
     const std::function<void()>                 &throw_on_cancel_callback,
-    const Feature::FuzzySkin::SurfaceDisplacement *displacement = nullptr)
+    const Feature::FuzzySkin::SurfaceDisplacement *displacement = nullptr,
+    std::vector<ExPolygons>                     *smooth = nullptr)
 {
     std::vector<ExPolygons> out;
     if (! z.empty() && ! ranges.empty()) {
         if (ranges.size() == 1 && z.front() >= ranges.front().first && z.back() < ranges.front().second) {
             // All layers fit into a single range.
-            out = slice_volume(volume, z, params, throw_on_cancel_callback, displacement);
+            out = slice_volume(volume, z, params, throw_on_cancel_callback, displacement, smooth);
         } else {
             std::vector<float>                     z_filtered;
             std::vector<std::pair<size_t, size_t>> n_filtered;
@@ -128,12 +132,19 @@ static std::vector<ExPolygons> slice_volume(
                     n_filtered.emplace_back(std::make_pair(first, i));
             }
             if (! n_filtered.empty()) {
-                std::vector<ExPolygons> layers = slice_volume(volume, z_filtered, params, throw_on_cancel_callback, displacement);
+                std::vector<ExPolygons> smooth_layers;
+                std::vector<ExPolygons> layers = slice_volume(volume, z_filtered, params, throw_on_cancel_callback, displacement,
+                                                              smooth != nullptr ? &smooth_layers : nullptr);
                 out.assign(z.size(), ExPolygons());
+                if (! smooth_layers.empty())
+                    smooth->assign(z.size(), ExPolygons());
                 i = 0;
                 for (const std::pair<size_t, size_t> &span : n_filtered)
-                    for (size_t j = span.first; j < span.second; ++ j)
+                    for (size_t j = span.first; j < span.second; ++ j) {
+                        if (! smooth_layers.empty())
+                            (*smooth)[j] = std::move(smooth_layers[i]);
                         out[j] = std::move(layers[i ++]);
+                    }
             }
         }
     }
@@ -156,6 +167,7 @@ static std::vector<VolumeSlices> slice_volumes_inner(
     ModelVolumePtrs                                           model_volumes,
     const std::vector<PrintObjectRegions::LayerRangeRegions> &layer_ranges,
     const std::vector<float>                                 &zs,
+    const Vec3d                                              &object_size,
     const std::function<void()>                              &throw_on_cancel_callback)
 {
     model_volumes_sort_by_id(model_volumes);
@@ -169,6 +181,7 @@ static std::vector<VolumeSlices> slice_volumes_inner(
 
     MeshSlicingParamsEx params_base;
     params_base.closing_radius = print_object_config.slice_closing_radius.value;
+    params_base.open_surface_width = float(print_object_config.open_surface_thickness.value);
     params_base.extra_offset   = 0;
     params_base.trafo          = object_trafo;
     //BBS: 0.0025mm is safe enough to simplify the data to speed slicing up for high-resolution model.
@@ -191,13 +204,18 @@ static std::vector<VolumeSlices> slice_volumes_inner(
     const auto   extra_offset = 0.f;
 
     // A part's own region (not a modifier's) decides whether its whole surface carries a displacement map.
-    auto surface_displacement = [&layer_ranges](const ModelVolume *model_volume) -> std::optional<Feature::FuzzySkin::SurfaceDisplacement> {
+    auto surface_displacement = [&layer_ranges, &object_size](const ModelVolume *model_volume) -> std::optional<Feature::FuzzySkin::SurfaceDisplacement> {
         if (! model_volume->is_model_part())
             return std::nullopt;
         for (const PrintObjectRegions::LayerRangeRegions &layer_range : layer_ranges)
             for (const PrintObjectRegions::VolumeRegion &volume_region : layer_range.volume_regions)
-                if (volume_region.model_volume == model_volume && volume_region.parent == -1 && volume_region.region != nullptr)
-                    return Feature::FuzzySkin::surface_displacement(volume_region.region->config());
+                if (volume_region.model_volume == model_volume && volume_region.parent == -1 && volume_region.region != nullptr) {
+                    const PrintRegionConfig &config = volume_region.region->config();
+                    // UV: the part's own model file unless a UV mesh is set.
+                    const std::string uv_source = Feature::FuzzySkin::uv_mesh_source(
+                        config.fuzzy_skin_texture_uv_mesh.value, model_volume->source.input_file, model_volume->get_object()->input_file);
+                    return Feature::FuzzySkin::surface_displacement(config, object_size, uv_source);
+                }
         return std::nullopt;
     };
 
@@ -207,6 +225,9 @@ static std::vector<VolumeSlices> slice_volumes_inner(
             MeshSlicingParamsEx params { params_base };
             if (! model_volume->is_negative_volume())
                 params.extra_offset = extra_offset;
+            // Only printed parts get width for their open surfaces, not modifiers or negative volumes.
+            if (! model_volume->is_model_part())
+                params.open_surface_width = 0.f;
             if (layer_ranges.size() == 1) {
                 if (const PrintObjectRegions::LayerRangeRegions &layer_range = layer_ranges.front(); layer_range.has_volume(model_volume->id())) {
                     if (model_volume->is_model_part() && print_config.spiral_mode) {
@@ -220,10 +241,10 @@ static std::vector<VolumeSlices> slice_volumes_inner(
                         for (; params.slicing_mode_normal_below_layer < zs.size() && zs[params.slicing_mode_normal_below_layer] < region_config.bottom_shell_thickness - EPSILON;
                             ++ params.slicing_mode_normal_below_layer);
                     }
-                    out.push_back({
-                        model_volume->id(),
-                        slice_volume(*model_volume, zs, params, throw_on_cancel_callback, displacement ? &*displacement : nullptr)
-                    });
+                    VolumeSlices volume_slices{ model_volume->id() };
+                    volume_slices.slices = slice_volume(*model_volume, zs, params, throw_on_cancel_callback, displacement ? &*displacement : nullptr,
+                                                        &volume_slices.smooth);
+                    out.push_back(std::move(volume_slices));
                 }
             } else {
                 assert(! print_config.spiral_mode);
@@ -231,11 +252,12 @@ static std::vector<VolumeSlices> slice_volumes_inner(
                 for (const PrintObjectRegions::LayerRangeRegions &layer_range : layer_ranges)
                     if (layer_range.has_volume(model_volume->id()))
                         slicing_ranges.emplace_back(layer_range.layer_height_range);
-                if (! slicing_ranges.empty())
-                    out.push_back({
-                        model_volume->id(),
-                        slice_volume(*model_volume, zs, slicing_ranges, params, throw_on_cancel_callback, displacement ? &*displacement : nullptr)
-                    });
+                if (! slicing_ranges.empty()) {
+                    VolumeSlices volume_slices{ model_volume->id() };
+                    volume_slices.slices = slice_volume(*model_volume, zs, slicing_ranges, params, throw_on_cancel_callback,
+                                                        displacement ? &*displacement : nullptr, &volume_slices.smooth);
+                    out.push_back(std::move(volume_slices));
+                }
             }
             if (! out.empty() && out.back().slices.empty())
                 out.pop_back();
@@ -5289,7 +5311,40 @@ void PrintObject::slice_volumes()
     if (!slice_zs.empty()) {
         objSliceByVolume = slice_volumes_inner(
             print->config(), this->config(), this->trafo_centered(),
-            this->model_object()->volumes, m_shared_regions->layer_ranges, slice_zs, throw_on_cancel_callback);
+            this->model_object()->volumes, m_shared_regions->layer_ranges, slice_zs, unscale(this->size()), throw_on_cancel_callback);
+    }
+
+    // Tree supports that ignore a displacement map's texture find their overhangs on the object without it: the
+    // untextured slices of the textured parts with the other parts' slices, less the negative volumes.
+    m_support_ignores_texture = false;
+    for (Layer *layer : m_layers)
+        layer->lslices_smooth.clear();
+    if (std::any_of(objSliceByVolume.begin(), objSliceByVolume.end(), [](const VolumeSlices &vs) { return ! vs.smooth.empty(); })) {
+        std::vector<const ModelVolume*> volume_of(objSliceByVolume.size(), nullptr);
+        for (size_t k = 0; k < objSliceByVolume.size(); ++ k)
+            for (const ModelVolume *mv : this->model_object()->volumes)
+                if (mv->id() == objSliceByVolume[k].volume_id)
+                    volume_of[k] = mv;
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, std::min(m_layers.size(), slice_zs.size())), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t layer_id = range.begin(); layer_id < range.end(); ++ layer_id) {
+                throw_on_cancel_callback();
+                Polygons solid, negative;
+                for (size_t k = 0; k < objSliceByVolume.size(); ++ k) {
+                    const VolumeSlices            &vs  = objSliceByVolume[k];
+                    const std::vector<ExPolygons> &src = vs.smooth.empty() ? vs.slices : vs.smooth;
+                    if (volume_of[k] == nullptr || layer_id >= src.size())
+                        continue;
+                    if (volume_of[k]->is_model_part())
+                        append(solid, to_polygons(src[layer_id]));
+                    else if (volume_of[k]->is_negative_volume())
+                        append(negative, to_polygons(src[layer_id]));
+                }
+                m_layers[layer_id]->lslices_smooth = negative.empty() ? union_ex(solid) : diff_ex(union_(solid), negative);
+            }
+        });
+        for (VolumeSlices &vs : objSliceByVolume)
+            std::vector<ExPolygons>().swap(vs.smooth);
+        m_support_ignores_texture = true;
     }
 
     //BBS: "model_part" volumes are grouded according to their connections

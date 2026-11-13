@@ -55,6 +55,7 @@ using namespace nlohmann;
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/GCode/PostProcessor.hpp"
 #include "libslic3r/Model.hpp"
+#include "libslic3r/TextureRelief.hpp"
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/Platform.hpp"
 #include "libslic3r/Print.hpp"
@@ -3784,6 +3785,21 @@ int CLI::run(int argc, char **argv)
     }
 
     BOOST_LOG_TRIVIAL(info) << "finished model pre-process commands\n";
+
+    // Models with a normal map (.glb / .obj): turn it into the displacement map over the whole surface.
+    if (const ConfigOptionBool* o = m_config.option<ConfigOptionBool>("relief_from_normal_map"); o != nullptr && o->value)
+        for (Model& model : m_models)
+            for (ModelObject* object : model.objects) {
+                if (!has_normal_map(*object))
+                    continue;
+                TextureReliefReport report;
+                std::string         error;
+                if (apply_normal_map_relief(*object, TextureReliefParams(), report, error))
+                    printf("relief from normal map (%s): %s\n", object->name.c_str(), report.summary().c_str());
+                else
+                    printf("relief from normal map failed (%s): %s\n", object->name.c_str(), error.c_str());
+            }
+
     bool oriented_or_arranged = false;
     //BBS: add orient and arrange logic here
     for (auto& model : m_models)

@@ -102,6 +102,24 @@ std::pair<bool, std::string> GLShadersManager::init()
         , { "ENABLE_ENVIRONMENT_MAP"sv }
 #endif // ENABLE_ENVIRONMENT_MAP
         );
+    // Optional: objects with a displacement map, the surface split and moved by tessellation shaders (OpenGL 4.0). Without
+    // it the map is only shaded on the surface (gouraud).
+    if (GUI::wxGetApp().is_gl_version_greater_or_equal_to(4, 0)) {
+        GLShaderProgram::ShaderFilenames files;
+        files[size_t(GLShaderProgram::EShaderType::Vertex)]         = "140/gouraud_displace.vs";
+        files[size_t(GLShaderProgram::EShaderType::Fragment)]       = "140/gouraud_displace.fs";
+        files[size_t(GLShaderProgram::EShaderType::TessControl)]    = "140/gouraud_displace.tcs";
+        files[size_t(GLShaderProgram::EShaderType::TessEvaluation)] = "140/gouraud_displace.tes";
+        const size_t error_length = error.size();
+        if (!append_shader("gouraud_displace", files
+#if ENABLE_ENVIRONMENT_MAP
+                           , { "ENABLE_ENVIRONMENT_MAP"sv }
+#endif // ENABLE_ENVIRONMENT_MAP
+                           )) {
+            error.erase(error_length);
+            BOOST_LOG_TRIVIAL(warning) << "Displacement tessellation shader unavailable, the displacement map preview only shades the surface";
+        }
+    }
     // used to render variable layers heights in 3d editor
     valid &= append_shader("variable_layer_height", { prefix + "variable_layer_height.vs", prefix + "variable_layer_height.fs" });
     // used to render highlight contour around selected triangles inside the multi-material gizmo

@@ -374,6 +374,37 @@ static bool obj_parseline(const char *line, ObjData &data)
 	return true;
 }
 static std::string cur_mtl_name = "";
+// The file name of a texture map statement: the text after the options ("-bm 1.0", "-s 1 1 1", ...). Options take
+// numeric arguments, so the file name starts at the first word after them that is not a number.
+static std::string mtl_map_file(const char *line)
+{
+    std::vector<std::string> words;
+    std::string              cur;
+    for (const char *c = line; *c != 0 && *c != '\r' && *c != '\n'; ++c) {
+        if (*c == ' ' || *c == '\t') {
+            if (!cur.empty())
+                words.push_back(cur);
+            cur.clear();
+        } else
+            cur += *c;
+    }
+    if (!cur.empty())
+        words.push_back(cur);
+    size_t i = 0;
+    while (i < words.size() && words[i][0] == '-') {
+        ++i;
+        while (i < words.size() && (isdigit((unsigned char) words[i][0]) || ((words[i][0] == '-' || words[i][0] == '.') && words[i].size() > 1 &&
+                                                                               (isdigit((unsigned char) words[i][1]) || words[i][1] == '.'))))
+            ++i;
+        // on/off flags (-clamp on, -blendu off)
+        if (i < words.size() && (words[i] == "on" || words[i] == "off"))
+            ++i;
+    }
+    std::string file;
+    for (; i < words.size(); ++i)
+        file += (file.empty() ? "" : " ") + words[i];
+    return file;
+}
 static bool        mtl_parseline(const char *line, MtlData &data)
 {
     if (*line == 0) return true;
@@ -387,21 +418,35 @@ static bool        mtl_parseline(const char *line, MtlData &data)
         case '#': {// Comment, ignore the rest of the line.
             break;
         }
-		case 'n': {
-			if (*(line++) != 'e' || *(line++) != 'w' || *(line++) != 'm' || *(line++) != 't' || *(line++) != 'l')
-				return false;
-			EATWS();
-			ObjNewMtl new_mtl;
-            cur_mtl_name = line;
-            data.new_mtl_unmap[cur_mtl_name] = std::make_shared<ObjNewMtl>();
-			break;
-		}
+        case 'n': {
+            if (strncmp(line, "ewmtl", 5) == 0) {
+                line += 5;
+                EATWS();
+                cur_mtl_name = line;
+                data.new_mtl_unmap[cur_mtl_name] = std::make_shared<ObjNewMtl>();
+            } else if (strncmp(line, "orm", 3) == 0 && (line[3] == ' ' || line[3] == '\t')) {
+                // norm [options] file: a normal map
+                if (data.new_mtl_unmap.find(cur_mtl_name) != data.new_mtl_unmap.end())
+                    data.new_mtl_unmap[cur_mtl_name]->map_Bump = mtl_map_file(line + 3);
+            }
+            break;
+        }
+        case 'b': {
+            // bump [options] file
+            if (strncmp(line, "ump", 3) == 0 && (line[3] == ' ' || line[3] == '\t') &&
+                data.new_mtl_unmap.find(cur_mtl_name) != data.new_mtl_unmap.end())
+                data.new_mtl_unmap[cur_mtl_name]->map_Bump = mtl_map_file(line + 3);
+            break;
+        }
         case 'm': {
-            if (*(line++) != 'a' || *(line++) != 'p' || *(line++) != '_' || *(line++) != 'K' || *(line++) != 'd') return false;
-            EATWS();
-            if (data.new_mtl_unmap.find(cur_mtl_name) != data.new_mtl_unmap.end()) {
-				data.new_mtl_unmap[cur_mtl_name]->map_Kd = line;
-			}
+            // map_Kd, map_Bump / map_bump; other maps are ignored
+            if (data.new_mtl_unmap.find(cur_mtl_name) == data.new_mtl_unmap.end())
+                break;
+            if (strncmp(line, "ap_Kd", 5) == 0 && (line[5] == ' ' || line[5] == '\t')) {
+                data.new_mtl_unmap[cur_mtl_name]->map_Kd = mtl_map_file(line + 5);
+            } else if ((strncmp(line, "ap_Bump", 7) == 0 || strncmp(line, "ap_bump", 7) == 0) && (line[7] == ' ' || line[7] == '\t')) {
+                data.new_mtl_unmap[cur_mtl_name]->map_Bump = mtl_map_file(line + 7);
+            }
             break;
         }
         case 'N': {

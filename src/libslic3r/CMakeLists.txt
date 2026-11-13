@@ -129,6 +129,11 @@ set(lisbslic3r_sources
     Feature/FuzzySkin/FuzzySkin.hpp
     Feature/FuzzySkin/SurfaceDisplacement.cpp
     Feature/FuzzySkin/SurfaceDisplacement.hpp
+    Feature/FuzzySkin/TextureMapping.hpp
+    Feature/FuzzySkin/TexturePatterns.cpp
+    Feature/FuzzySkin/TexturePatterns.hpp
+    Feature/FuzzySkin/SurfacePattern.cpp
+    Feature/FuzzySkin/SurfacePattern.hpp
     Feature/Interlocking/InterlockingGenerator.cpp
     Feature/Interlocking/InterlockingGenerator.hpp
     Feature/Interlocking/VoxelUtils.cpp
@@ -191,6 +196,8 @@ set(lisbslic3r_sources
     format.hpp
     Format/OBJ.cpp
     Format/OBJ.hpp
+    Format/TexturedMesh.cpp
+    Format/TexturedMesh.hpp
     Format/objparser.cpp
     Format/objparser.hpp
     Format/SL1.cpp
@@ -462,6 +469,10 @@ set(lisbslic3r_sources
     TriangleMeshSlicer.cpp
     TriangleMeshSlicer.hpp
     TriangleSelector.cpp
+    TextureRelief.cpp
+    TextureRelief.hpp
+    TextToHeight.cpp
+    TextToHeight.hpp
     TriangleSelector.hpp
     TriangleSetSampling.cpp
     TriangleSetSampling.hpp
@@ -615,6 +626,55 @@ endif()
 if(WIN32)
     target_link_libraries(libslic3r PRIVATE Psapi.lib)
 endif()
+
+# Text to height map (optional): stable-diffusion.cpp and ggml as shared libraries, installed to SDCPP_ROOT
+# (deps/StableDiffusionCpp). Without it the slicer builds as before and the feature is hidden.
+set(SDCPP_ROOT "" CACHE PATH "stable-diffusion.cpp install prefix (shared libraries); enables text to height map")
+if (NOT SDCPP_ROOT)
+    # built with the dependencies (-DDEP_TEXT2HEIGHT=ON)
+    foreach (_prefix ${CMAKE_PREFIX_PATH})
+        if (EXISTS "${_prefix}/include/stable-diffusion.h")
+            set(SDCPP_ROOT "${_prefix}")
+        endif ()
+    endforeach ()
+endif ()
+if (NOT "${SDCPP_ROOT}" STREQUAL "${_SDCPP_ROOT_FOUND}")
+    # another install: look the libraries up again
+    unset(SDCPP_INCLUDE_DIR CACHE)
+    unset(SDCPP_LIBRARY CACHE)
+    unset(SDCPP_GGML_LIBRARY CACHE)
+    unset(SDCPP_GGML_BASE_LIBRARY CACHE)
+    unset(SDCPP_GGML_CPU_LIBRARY CACHE)
+    set(_SDCPP_ROOT_FOUND "${SDCPP_ROOT}" CACHE INTERNAL "")
+endif ()
+if (SDCPP_ROOT)
+    find_path(SDCPP_INCLUDE_DIR stable-diffusion.h PATHS "${SDCPP_ROOT}/include" NO_DEFAULT_PATH)
+    find_library(SDCPP_LIBRARY stable-diffusion PATHS "${SDCPP_ROOT}/lib" NO_DEFAULT_PATH)
+    find_library(SDCPP_GGML_LIBRARY ggml PATHS "${SDCPP_ROOT}/lib" NO_DEFAULT_PATH)
+    find_library(SDCPP_GGML_BASE_LIBRARY ggml-base PATHS "${SDCPP_ROOT}/lib" NO_DEFAULT_PATH)
+    # Only when the backends are linked in. Built with GGML_BACKEND_DL (the processor variants and Vulkan as libraries
+    # loaded at run time, deps/StableDiffusionCpp) there is nothing to link: TextToHeight.cpp finds them through ggml.
+    find_library(SDCPP_GGML_CPU_LIBRARY ggml-cpu PATHS "${SDCPP_ROOT}/lib" NO_DEFAULT_PATH)
+    if (SDCPP_INCLUDE_DIR AND SDCPP_LIBRARY AND SDCPP_GGML_LIBRARY AND SDCPP_GGML_BASE_LIBRARY)
+        message(STATUS "Text to height map: stable-diffusion.cpp in ${SDCPP_ROOT}")
+        target_compile_definitions(libslic3r PRIVATE SLIC3R_TEXT2HEIGHT)
+        target_include_directories(libslic3r SYSTEM PRIVATE "${SDCPP_INCLUDE_DIR}")
+        target_link_libraries(libslic3r PRIVATE "${SDCPP_LIBRARY}" "${SDCPP_GGML_LIBRARY}" "${SDCPP_GGML_BASE_LIBRARY}")
+        if (SDCPP_GGML_CPU_LIBRARY)
+            target_link_libraries(libslic3r PRIVATE "${SDCPP_GGML_CPU_LIBRARY}")
+        endif ()
+        file(GLOB SDCPP_RUNTIME_LIBS "${SDCPP_ROOT}/bin/*${CMAKE_SHARED_LIBRARY_SUFFIX}" "${SDCPP_ROOT}/lib/*${CMAKE_SHARED_LIBRARY_SUFFIX}")
+        set(SDCPP_RUNTIME_LIBS "${SDCPP_RUNTIME_LIBS}" CACHE INTERNAL "")
+    else ()
+        message(WARNING "SDCPP_ROOT=${SDCPP_ROOT} does not hold a shared stable-diffusion.cpp build; text to height map disabled")
+    endif ()
+endif ()
+# Copies the stable-diffusion.cpp libraries next to an executable that links libslic3r.
+function(slic3r_copy_text2height_libs target)
+    foreach (lib ${SDCPP_RUNTIME_LIBS})
+        add_custom_command(TARGET ${target} POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different "${lib}" "$<TARGET_FILE_DIR:${target}>")
+    endforeach ()
+endfunction()
 
 if(SLIC3R_PROFILE)
     target_link_libraries(libslic3r PRIVATE Shiny)

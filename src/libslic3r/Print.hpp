@@ -50,6 +50,8 @@ struct VolumeSlices
 {
     ObjectID                volume_id;
     std::vector<ExPolygons> slices;
+    // A part whose surface a displacement map moves, when tree supports ignore the texture: its slices without the map.
+    std::vector<ExPolygons> smooth;
 };
 
 struct groupedVolumeSlices
@@ -411,6 +413,8 @@ public:
     // BBS
     void generate_support_preview();
     const std::vector<VolumeSlices>& firstLayerObjSlice() const { return firstLayerObjSliceByVolume; }
+    // Whether the layers carry Layer::lslices_smooth, for tree supports that ignore a displacement map's texture.
+    bool support_ignores_texture() const { return m_support_ignores_texture; }
     std::vector<VolumeSlices>& firstLayerObjSliceMod() { return firstLayerObjSliceByVolume; }
     const std::vector<groupedVolumeSlices>& firstLayerObjGroups() const { return firstLayerObjSliceByGroups; }
     std::vector<groupedVolumeSlices>& firstLayerObjGroupsMod() { return firstLayerObjSliceByGroups; }
@@ -628,6 +632,7 @@ private:
     FillLightning::GeneratorPtr m_lightning_generator;
 
     std::vector < VolumeSlices >            firstLayerObjSliceByVolume;
+    bool                                    m_support_ignores_texture = false;
     std::vector<groupedVolumeSlices>        firstLayerObjSliceByGroups;
 
     // BBS: per object skirt

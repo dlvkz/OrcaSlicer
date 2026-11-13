@@ -193,6 +193,10 @@ set(SLIC3R_GUI_SOURCES
     #GUI/Gizmos/GLGizmoText.hpp
     GUI/GLCanvas3D.cpp
     GUI/GLCanvas3D.hpp
+    GUI/DisplacementPreview.cpp
+    GUI/DisplacementPreview.hpp
+    GUI/TextToHeightDialog.cpp
+    GUI/TextToHeightDialog.hpp
     GUI/GLPickingBuffer.cpp
     GUI/GLPickingBuffer.hpp
     GUI/SoftShadowRenderer.cpp

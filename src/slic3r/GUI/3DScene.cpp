@@ -747,6 +747,19 @@ void GLVolume::simple_render(GLShaderProgram*        shader,
             else
                 m.render(this->tverts_range);
         }
+    } else if (displacement_preview.active && !picking) {
+        // The displacement preview shades the full mesh: a simplified LOD would move the texture.
+        // The patch model only goes with the tessellation shader (GLVolumeCollection::render picks it).
+        const GLShaderProgram* current = GUI::wxGetApp().get_current_shader();
+        const bool    tessellated = displacement_preview.displaced && displacement_mesh_model.is_initialized() && current != nullptr &&
+                                 current->get_name() == "gouraud_displace";
+        GUI::GLModel& m = tessellated ? displacement_mesh_model :
+                          displacement_preview.projection == 2 && displacement_uv_model.is_initialized() ? displacement_uv_model : model;
+        m.set_color(render_color);
+        if (&m == &model && tverts_range != std::make_pair<size_t, size_t>(0, -1))
+            m.render(this->tverts_range);
+        else
+            m.render();
     } else {
         // Select LOD model based on current LOD level
         static int lodRenderLogCounter = 0;
@@ -1216,6 +1229,11 @@ bool GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
     if (shader == nullptr)
         return false;
 
+    // Parts with a displacement map are drawn by the tessellation shader, which moves their surface (if the OpenGL
+    // version has it); the others by the current one.
+    GLShaderProgram* const base_shader     = shader;
+    GLShaderProgram* const displace_shader = GUI::wxGetApp().get_shader("gouraud_displace");
+
     GLShaderProgram* sink_shader  = GUI::wxGetApp().get_shader("flat");
     const bool canRenderSinkingContours = m_show_sinking_contours && sink_shader != nullptr;
 
@@ -1298,6 +1316,17 @@ bool GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
             }
         }
 
+        {
+            const GLVolume* v = volume.first;
+            GLShaderProgram* const volume_shader = displace_shader != nullptr && base_shader->get_name() == "gouraud" &&
+                                                           v->displacement_preview.active && v->displacement_preview.displaced &&
+                                                           !v->picking && v->displacement_mesh_model.is_initialized() ?
+                                                       displace_shader : base_shader;
+            if (volume_shader != shader) {
+                shader = volume_shader;
+                shader->start_using();
+            }
+        }
         if (!volume.first->model.is_initialized())
             shader->set_uniform("uniform_color", volume.first->render_color);
         shader->set_uniform("z_range", m_z_range);
@@ -1349,7 +1378,64 @@ bool GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
         const Matrix3d view_normal_matrix = view_matrix.matrix().block(0, 0, 3, 3) *
                                             model_matrix.matrix().block(0, 0, 3, 3).inverse().transpose();
         shader->set_uniform("view_normal_matrix", view_normal_matrix);
+
+        // Fuzzy skin displacement map preview, on texture unit 1 (unit 0 may hold the environment map).
+        const GLVolume::DisplacementPreview& disp = volume.first->displacement_preview;
+        const bool disp_active = disp.active && disp.texture != 0 && !volume.first->picking;
+        shader->set_uniform("disp_active", disp_active);
+        if (shader == displace_shader) {
+            // How finely the tessellation splits the surface: about every 4 pixels, not below 0.1 mm.
+            const std::array<int, 4>& viewport = camera.get_viewport();
+            shader->set_uniform("disp_viewport", Vec2f(float(viewport[2]), float(viewport[3])));
+            shader->set_uniform("disp_pixels_per_segment", 4.f);
+            shader->set_uniform("disp_min_edge", 0.1f);
+        }
+        if (disp_active) {
+            glsafe(::glActiveTexture(GL_TEXTURE1));
+            glsafe(::glBindTexture(GL_TEXTURE_2D, disp.texture));
+            glsafe(::glActiveTexture(GL_TEXTURE0));
+            shader->set_uniform("disp_tex", 1);
+            shader->set_uniform("disp_projection", disp.projection);
+            shader->set_uniform("disp_walls_only", disp.walls_only);
+            shader->set_uniform("disp_size", disp.size);
+            shader->set_uniform("disp_aspect", disp.aspect);
+            shader->set_uniform("disp_depth", disp.depth);
+            shader->set_uniform("disp_center", disp.center);
+            const float angle = disp.rotation * float(M_PI) / 180.f;
+            shader->set_uniform("disp_rotation", Vec2f(std::cos(angle), std::sin(angle)));
+            shader->set_uniform("disp_invert", disp.invert);
+            shader->set_uniform("disp_midlevel", disp.midlevel);
+            shader->set_uniform("disp_tiles_around", disp.tiles_around);
+            shader->set_uniform("disp_center_z", disp.center_z);
+            shader->set_uniform("disp_pattern", disp.pattern);
+            shader->set_uniform("disp_noise_range", disp.noise_range);
+            if (disp.projection == 7) {
+                // The sites of a pattern laid on the surface, on units 2 and 3.
+                glsafe(::glActiveTexture(GL_TEXTURE2));
+                glsafe(::glBindTexture(GL_TEXTURE_2D, disp.sites_texture));
+                glsafe(::glActiveTexture(GL_TEXTURE3));
+                glsafe(::glBindTexture(GL_TEXTURE_2D, disp.buckets_texture));
+                glsafe(::glActiveTexture(GL_TEXTURE0));
+                shader->set_uniform("disp_sites", 2);
+                shader->set_uniform("disp_buckets", 3);
+                shader->set_uniform("disp_bucket_mask", disp.bucket_mask);
+                shader->set_uniform("disp_cell", disp.cell);
+                shader->set_uniform("disp_origin", disp.origin);
+                shader->set_uniform("disp_offset", disp.offset);
+            }
+        }
         volume.first->render();
+        if (disp_active) {
+            if (disp.projection == 7) {
+                glsafe(::glActiveTexture(GL_TEXTURE3));
+                glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+                glsafe(::glActiveTexture(GL_TEXTURE2));
+                glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+            }
+            glsafe(::glActiveTexture(GL_TEXTURE1));
+            glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+            glsafe(::glActiveTexture(GL_TEXTURE0));
+        }
 
 #if ENABLE_ENVIRONMENT_MAP
         if (use_environment_texture)
@@ -1358,6 +1444,10 @@ bool GLVolumeCollection::render(GLVolumeCollection::ERenderType      type,
 
         glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
         glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
+    }
+    if (shader != base_shader) {
+        shader = base_shader;
+        shader->start_using();
     }
 
     if (canRenderSinkingContours)

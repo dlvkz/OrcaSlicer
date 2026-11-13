@@ -32,7 +32,9 @@ namespace GUI {
                 TriangleFan,
                 Lines,
                 LineStrip,
-                LineLoop
+                LineLoop,
+                // Triangles drawn as patches of three for tessellation shaders (OpenGL 4.0).
+                Patches
             };
 
             enum class EVertexLayout : unsigned char

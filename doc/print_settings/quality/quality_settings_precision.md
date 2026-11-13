@@ -3,6 +3,7 @@
 This section covers the settings that affect the precision of your prints. These settings can help you achieve better dimensional accuracy, reduce artifacts, and improve overall print quality.
 
 - [Slice gap closing radius](#slice-gap-closing-radius)
+- [Open surface thickness](#open-surface-thickness)
 - [Resolution](#resolution)
 - [Arc fitting](#arc-fitting)
 - [X-Y Compensation](#x-y-compensation)
@@ -16,6 +17,12 @@ This section covers the settings that affect the precision of your prints. These
 
 Cracks smaller than 2x gap closing radius are being filled during the triangle mesh slicing.  
 The gap closing operation may reduce the final print resolution, therefore it is advisable to keep the value reasonably low.
+
+## Open surface thickness
+
+Generated and scanned models (AI model generators, photogrammetry, game assets) are often not solid: a cape or a shoulder plate is a single surface with no thickness, and shells have holes too wide for the gap closing above. Slicing drops every outline that does not close, so such parts vanish from some or all layers.
+
+Above 0, every outline that stays open is printed as a wall this thick, and closed outlines thinner than this (a sealed but paper-thin shell) are thickened to it. About two line widths (0.8 mm with a 0.4 mm nozzle) prints them as two walls. Leave it at 0 for well-made models: on a solid model it changes nothing, but on a broken one it can also add small stray bits where the mesh has loose fragments.
 
 ## Resolution
 

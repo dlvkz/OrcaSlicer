@@ -8,6 +8,7 @@
 #include "Polygon.hpp"
 #include "PrintConfig.hpp"
 #include "SurfaceCollection.hpp"
+#include "Feature/FuzzySkin/TextureMapping.hpp"
 
 namespace Slic3r {
 struct FuzzySkinConfig
@@ -22,9 +23,9 @@ struct FuzzySkinConfig
     double        noise_persistence;
     FuzzySkinMode mode;
     // Displacement map (NoiseType::DisplacementMap only)
-    std::string                texture;
-    FuzzySkinTextureProjection texture_projection;
-    double                     texture_size;
+    std::string                            texture; // image path, with FuzzySkinTexturePattern::Image
+    FuzzySkinTexturePattern                texture_pattern = FuzzySkinTexturePattern::Image;
+    Feature::FuzzySkin::TextureMapping     texture_mapping;
 
     bool operator==(const FuzzySkinConfig& r) const
     {
@@ -38,8 +39,8 @@ struct FuzzySkinConfig
             && noise_persistence == r.noise_persistence
             && mode == r.mode
             && texture == r.texture
-            && texture_projection == r.texture_projection
-            && texture_size == r.texture_size;
+            && texture_pattern == r.texture_pattern
+            && texture_mapping == r.texture_mapping;
     }
 
     bool operator!=(const FuzzySkinConfig& r) const { return !(*this == r); }
@@ -61,8 +62,14 @@ template<> struct hash<Slic3r::FuzzySkinConfig>
         boost::hash_combine(seed, std::hash<double>{}(c.noise_persistence));
         boost::hash_combine(seed, std::hash<int>{}(int(c.mode)));
         boost::hash_combine(seed, std::hash<std::string>{}(c.texture));
-        boost::hash_combine(seed, std::hash<int>{}(int(c.texture_projection)));
-        boost::hash_combine(seed, std::hash<double>{}(c.texture_size));
+        boost::hash_combine(seed, std::hash<int>{}(int(c.texture_pattern)));
+        boost::hash_combine(seed, std::hash<int>{}(int(c.texture_mapping.projection)));
+        boost::hash_combine(seed, std::hash<double>{}(c.texture_mapping.size));
+        boost::hash_combine(seed, std::hash<double>{}(c.texture_mapping.rotation));
+        boost::hash_combine(seed, std::hash<bool>{}(c.texture_mapping.invert));
+        boost::hash_combine(seed, std::hash<double>{}(c.texture_mapping.offset));
+        boost::hash_combine(seed, std::hash<double>{}(c.texture_mapping.radius));
+        boost::hash_combine(seed, std::hash<double>{}(c.texture_mapping.center_z));
         return seed;
     }
 };

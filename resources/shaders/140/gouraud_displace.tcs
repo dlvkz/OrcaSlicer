@@ -1,0 +1,68 @@
+#version 400
+
+// Splits each triangle of the part so the displacement map can move the surface: an edge gets one segment per
+// disp_pixels_per_segment pixels on screen, but none shorter than disp_min_edge mm, and at most 64. An edge's level
+// depends only on its two end points, so the triangles on both sides of it are split the same way and the surface stays
+// closed. Triangles off screen are dropped.
+
+layout(vertices = 3) out;
+
+uniform mat4 view_model_matrix;
+uniform mat4 projection_matrix;
+uniform mat4 volume_world_matrix;
+uniform vec2 disp_viewport;            // pixels
+uniform float disp_pixels_per_segment;
+uniform float disp_min_edge;           // mm
+
+in vec3 tc_position[];
+in vec3 tc_normal[];
+in vec2 tc_tex_coord[];
+
+out vec3 te_position[];
+out vec3 te_normal[];
+out vec2 te_tex_coord[];
+
+float edge_level(vec3 a, vec3 b, vec4 ca, vec4 cb)
+{
+    float by_size = length(mat3(volume_world_matrix) * (b - a)) / disp_min_edge;
+    float by_screen = by_size;
+    if (ca.w > 0.0 && cb.w > 0.0)
+        by_screen = length((ca.xy / ca.w - cb.xy / cb.w) * 0.5 * disp_viewport) / disp_pixels_per_segment;
+    return clamp(min(by_screen, by_size), 1.0, 64.0);
+}
+
+void main()
+{
+    te_position[gl_InvocationID]  = tc_position[gl_InvocationID];
+    te_normal[gl_InvocationID]    = tc_normal[gl_InvocationID];
+    te_tex_coord[gl_InvocationID] = tc_tex_coord[gl_InvocationID];
+
+    if (gl_InvocationID == 0) {
+        mat4 mvp = projection_matrix * view_model_matrix;
+        vec4 c0 = mvp * vec4(tc_position[0], 1.0);
+        vec4 c1 = mvp * vec4(tc_position[1], 1.0);
+        vec4 c2 = mvp * vec4(tc_position[2], 1.0);
+        // Off screen when all three corners are beyond the same side of the view (with a margin for the displacement).
+        float m = 1.1;
+        bool off = (c0.x > m * c0.w && c1.x > m * c1.w && c2.x > m * c2.w) ||
+                   (c0.x < -m * c0.w && c1.x < -m * c1.w && c2.x < -m * c2.w) ||
+                   (c0.y > m * c0.w && c1.y > m * c1.w && c2.y > m * c2.w) ||
+                   (c0.y < -m * c0.w && c1.y < -m * c1.w && c2.y < -m * c2.w) ||
+                   (c0.w <= 0.0 && c1.w <= 0.0 && c2.w <= 0.0);
+        if (off) {
+            gl_TessLevelOuter[0] = 0.0;
+            gl_TessLevelOuter[1] = 0.0;
+            gl_TessLevelOuter[2] = 0.0;
+            gl_TessLevelInner[0] = 0.0;
+        } else {
+            // Outer level i is the edge opposite corner i.
+            float e0 = edge_level(tc_position[1], tc_position[2], c1, c2);
+            float e1 = edge_level(tc_position[2], tc_position[0], c2, c0);
+            float e2 = edge_level(tc_position[0], tc_position[1], c0, c1);
+            gl_TessLevelOuter[0] = e0;
+            gl_TessLevelOuter[1] = e1;
+            gl_TessLevelOuter[2] = e2;
+            gl_TessLevelInner[0] = max(e0, max(e1, e2));
+        }
+    }
+}

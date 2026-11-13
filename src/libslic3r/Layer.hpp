@@ -154,6 +154,8 @@ public:
     ExPolygons 				 lslices;
     ExPolygons 				 lslices_extrudable;  // BBS: the extrudable part of lslices used for tree support
     std::vector<BoundingBox> lslices_bboxes;
+    // The object's slices without a displacement map's texture, where tree supports ignore it (else empty).
+    ExPolygons               lslices_smooth;
 
     // BBS
     ExPolygons              loverhangs;

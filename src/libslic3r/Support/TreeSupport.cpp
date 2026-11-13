@@ -670,6 +670,33 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
         return;
     }
 
+    // A displacement map's texture that supports ignore: the overhangs are found on the slices without it, so the
+    // texture's own small overhangs get no support. Collisions are computed elsewhere from the textured slices, which
+    // are put back when this returns.
+    std::vector<std::pair<ExPolygons, std::vector<BoundingBox>>> textured_slices;
+    if (m_object->support_ignores_texture()) {
+        textured_slices.resize(m_object->layer_count());
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, m_object->layer_count()), [&](const tbb::blocked_range<size_t>& range) {
+            for (size_t layer_nr = range.begin(); layer_nr < range.end(); ++layer_nr) {
+                Layer*                   layer = m_object->get_layer(layer_nr);
+                std::vector<BoundingBox> bboxes;
+                bboxes.reserve(layer->lslices_smooth.size());
+                for (const ExPolygon& expoly : layer->lslices_smooth)
+                    bboxes.emplace_back(get_extents(expoly));
+                textured_slices[layer_nr] = { std::move(layer->lslices), std::move(layer->lslices_bboxes) };
+                layer->lslices            = layer->lslices_smooth;
+                layer->lslices_bboxes     = std::move(bboxes);
+            }
+        });
+    }
+    Slic3r::ScopeGuard restore_textured_slices([this, &textured_slices]() {
+        for (size_t layer_nr = 0; layer_nr < textured_slices.size() && layer_nr < m_object->layer_count(); ++layer_nr) {
+            Layer* layer          = m_object->get_layer(layer_nr);
+            layer->lslices        = std::move(textured_slices[layer_nr].first);
+            layer->lslices_bboxes = std::move(textured_slices[layer_nr].second);
+        }
+    });
+
     // Clear and create Tree Support Layers
     m_object->clear_support_layers();
     m_object->clear_tree_support_preview_cache();
@@ -744,7 +771,7 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
             if (layer_nr < 1) return false;
             auto it = layer_overhangs.find(layer_nr - 1);
             if (it == layer_overhangs.end()) return false;
-            const ExPolygons overhangs = it->second;
+            const ExPolygons &overhangs = it->second;
 
             this->offset = offset;
             auto dilate1 = offset_ex(region, offset);
@@ -753,23 +780,19 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
                 return false;
             return overlaps(overhangs, dilate1);
         }
-        // it's basically the combination of push_back and intersects, but saves an offset_ex
-        bool push_back_if_intersects(const ExPolygon& region, int layer_nr, coordf_t offset) {
+        // it's basically the combination of push_back and intersects, but saves an offset_ex.
+        // dilate1 = offset_ex(region, offset) and bbox = get_extents(dilate1), computed once by the caller for all clusters.
+        bool push_back_if_intersects(const ExPolygon& region, int layer_nr, coordf_t offset, const ExPolygons& dilate1, const BoundingBox& bbox) {
             bool is_intersect = false;
             this->offset      = offset;
-            ExPolygons dilate1;
-            BoundingBox bbox;
             do {
                 if (layer_nr < 1) break;
                 auto it = layer_overhangs.find(layer_nr - 1);
                 if (it == layer_overhangs.end()) break;
-                const ExPolygons overhangs = it->second;
-                dilate1 = offset_ex(region, offset);
                 if (dilate1.empty()) break;
-                bbox = get_extents(dilate1);
                 if (!merged_bbox.overlap(bbox))
                     break;
-                is_intersect = overlaps(overhangs, dilate1);
+                is_intersect = overlaps(it->second, dilate1);
             } while (0);
             if (is_intersect) {
                 auto it = layer_overhangs.find(layer_nr);
@@ -797,7 +820,7 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
             float avg_area             = 0;
             int   num_layers           = 0;
             for (auto it = layer_overhangs.begin(); it != layer_overhangs.end(); it++) {
-                const ExPolygons overhangs = it->second;
+                const ExPolygons &overhangs = it->second;
                 ExPolygons       erodel   = offset_ex(overhangs, -extrusion_width_scaled / 2);
                 coord_t          narrow_width = 0;
                 for (auto &poly : erodel) {
@@ -831,22 +854,30 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
             }
         }
 
-        void check_polygon_node(float thresh_big_overhang, const ExPolygons &m_layer_outlines_below)
+        // outlines_below_near(box): the object outlines below the cluster, inside box.
+        void check_polygon_node(float thresh_big_overhang, const std::function<ExPolygons(const BoundingBox&)> &outlines_below_near)
         {
-            ExPolygons outlines_below_eroded = offset_ex(m_layer_outlines_below, -this->offset);
             if (area(merged_poly) > SQ(thresh_big_overhang))
                 set_type(BigFlat, true);
-            else if (merged_bbox.size().any_comp(thresh_big_overhang, ">") && min_layer < 20)
+            else if (merged_bbox.size().any_comp(thresh_big_overhang, ">") && min_layer < 20) {
+                // Eroding moves the outline in by this->offset, so only the outline near the cluster can reach it; the
+                // box is wide enough that its cut edges, eroded, stay clear of the cluster.
+                const BoundingBox reach = merged_bbox.inflated(coord_t(2. * std::abs(this->offset)) + coord_t(scale_(1.)));
+                ExPolygons outlines_below_eroded = offset_ex(outlines_below_near(reach), -this->offset);
                 if (!overlaps(merged_poly, outlines_below_eroded)) set_type(ThinPlate, true);
+            }
         }
     };
     std::vector<OverhangCluster> overhangClusters;
 
     auto find_and_insert_cluster = [](auto &regionClusters, const ExPolygon &region, int layer_nr, coordf_t offset) {
         OverhangCluster *cluster = nullptr;
+        // The dilated region is the same for every cluster; on a textured surface there are thousands of clusters.
+        const ExPolygons  dilate1 = offset_ex(region, offset);
+        const BoundingBox bbox    = get_extents(dilate1);
         for (int i = 0; i < regionClusters.size(); i++) {
             auto cluster_i = &regionClusters[i];
-            if (cluster_i->push_back_if_intersects(region, layer_nr, offset)) {
+            if (cluster_i->push_back_if_intersects(region, layer_nr, offset, dilate1, bbox)) {
                 cluster = cluster_i;
                 break;
             }
@@ -876,21 +907,57 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
             }
         });
 
-    // Pre-compute cumulative object outlines below each layer for BigFlat/ThinPlate classification.
-    // (Bambu has this in TreeSupportData constructor; here we compute it early because
-    //  m_ts_data is not yet allocated at detect_overhangs time — fixes "illegal access" crash.)
-    std::vector<ExPolygons> layer_outlines_below;
-    layer_outlines_below.reserve(m_object->layer_count());
-    for (size_t layer_nr = 0; layer_nr < m_object->layer_count(); layer_nr++) {
-        const Layer* layer = m_object->get_layer(layer_nr);
-        ExPolygons outline;
-        for (const ExPolygon& poly : layer->lslices)
-            poly.simplify(scale_(radius_sample_resolution), &outline);
-        if (layer_nr == 0)
-            layer_outlines_below.push_back(outline);
-        else
-            layer_outlines_below.push_back(union_ex(layer_outlines_below[layer_nr - 1], outline));
+    // Object outlines below each layer, for the BigFlat/ThinPlate and small overhang checks of the clusters.
+    // (Bambu keeps them in the TreeSupportData constructor; here they are set up early because m_ts_data is not yet
+    //  allocated at detect_overhangs time — fixes "illegal access" crash.)
+    // Both checks only look near a cluster. Uniting the whole outline below for every layer is slow on a model with a
+    // detailed surface (a displacement map), so the outlines are united in blocks of layers, the blocks chained, and
+    // the outline below a layer is put together only around a cluster: the union of the blocks before its block and
+    // of its block-mates, each clipped to the box first.
+    const size_t            num_object_layers = m_object->layer_count();
+    const size_t            outline_block     = 32;
+    std::vector<ExPolygons> layer_outlines(num_object_layers);
+    std::vector<ExPolygons> outlines_before_block((num_object_layers + outline_block - 1) / outline_block);
+    {
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, num_object_layers), [&](const tbb::blocked_range<size_t>& range) {
+            for (size_t layer_nr = range.begin(); layer_nr < range.end(); ++layer_nr)
+                for (const ExPolygon& poly : m_object->get_layer(layer_nr)->lslices)
+                    poly.simplify(scale_(radius_sample_resolution), &layer_outlines[layer_nr]);
+        });
+        std::vector<ExPolygons> block_union(outlines_before_block.size());
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, block_union.size()), [&](const tbb::blocked_range<size_t>& range) {
+            for (size_t b = range.begin(); b < range.end(); ++b) {
+                Polygons polys;
+                for (size_t i = b * outline_block; i < std::min(num_object_layers, (b + 1) * outline_block); ++i)
+                    append(polys, to_polygons(layer_outlines[i]));
+                block_union[b] = union_ex(polys);
+            }
+        });
+        // Running union of the blocks. Uniting them one after the other is slow when their detailed edges lie almost on
+        // top of each other and cross thousands of times, so it is done in rounds instead: in round d, every block is
+        // united with the running union d blocks back (d = 1, 2, 4, ...), all blocks of a round in parallel.
+        for (size_t d = 1; d < block_union.size(); d *= 2) {
+            std::vector<ExPolygons> next(block_union.size());
+            tbb::parallel_for(tbb::blocked_range<size_t>(0, block_union.size()), [&](const tbb::blocked_range<size_t>& range) {
+                for (size_t b = range.begin(); b < range.end(); ++b)
+                    next[b] = b >= d ? union_ex(block_union[b - d], block_union[b]) : block_union[b];
+            });
+            block_union = std::move(next);
+        }
+        for (size_t b = 1; b < outlines_before_block.size(); ++b)
+            outlines_before_block[b] = std::move(block_union[b - 1]);
     }
+    // The union of the outlines of layers 0 to layer_nr, inside box.
+    auto outlines_below_near = [&](int layer_nr, const BoundingBox& box) {
+        if (layer_nr < 0 || size_t(layer_nr) >= num_object_layers)
+            return ExPolygons{};
+        const size_t b     = size_t(layer_nr) / outline_block;
+        Polygons     polys = ClipperUtils::clip_clipper_polygons_with_subject_bbox(outlines_before_block[b], box);
+        for (size_t i = b * outline_block; i <= size_t(layer_nr); ++i)
+            append(polys, ClipperUtils::clip_clipper_polygons_with_subject_bbox(layer_outlines[i], box));
+        // The non-zero fill rule unites the overlapping pieces.
+        return intersection_ex(polys, Polygons{ box.polygon() });
+    };
 
     typedef std::chrono::high_resolution_clock clock_;
     typedef std::chrono::duration<double, std::ratio<1> > second_;
@@ -1086,7 +1153,15 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
             // BBS detect sharp tail
             const ExPolygons& lower_layer_sharptails = lower_layer->sharp_tails;
             const auto& lower_layer_sharptails_height = lower_layer->sharp_tails_height;
+            // A region is only a sharp tail on top of one (2.1 below), so a layer with none below has nothing to check,
+            // and a region away from them neither. Intersecting a detailed outline (a displacement map) just to find
+            // that out, layer after layer, was slow.
+            if (lower_layer_sharptails.empty())
+                continue;
+            const BoundingBox lower_layer_sharptails_bbox = get_extents(lower_layer_sharptails);
             for (ExPolygon& expoly : layer->lslices_extrudable) {
+                if (!get_extents(expoly).overlap(lower_layer_sharptails_bbox))
+                    continue;
                 bool  is_sharp_tail = false;
                 float accum_height = layer->height;
                 do {
@@ -1187,8 +1262,11 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
             cluster.check_small_overhang(extrusion_width_scaled, length_thresh_small_overhang, radius_thresh_small_overhang);
             // Keep deep Small fragments: scalloped-cantilever nubs reach past the model below by one radius_thresh.
             if (cluster.is_type(Small) && !enforce_add && cluster.min_layer >= 1) {
-                const ExPolygons deep_part = diff_ex(cluster.merged_poly,
-                    offset_ex(layer_outlines_below[cluster.min_layer - 1], radius_thresh_small_overhang));
+                // Only the outline below within reach of the cluster counts, so it is cut to the cluster's surroundings
+                // before being grown: growing the whole outline below for every small cluster was the slow part.
+                const BoundingBox reach = get_extents(cluster.merged_poly).inflated(coord_t(2. * radius_thresh_small_overhang));
+                const ExPolygons  below_near = outlines_below_near(cluster.min_layer - 1, reach);
+                const ExPolygons deep_part = diff_ex(cluster.merged_poly, offset_ex(below_near, radius_thresh_small_overhang));
                 if (!deep_part.empty())
                     cluster.set_type(Small, false);
             }
@@ -1211,7 +1289,8 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
         }
 
         if (!cluster.is_type(Small) || enforce_add) {
-            cluster.check_polygon_node(m_support_params.thresh_big_overhang, layer_outlines_below[cluster.min_layer - 1]);
+            cluster.check_polygon_node(m_support_params.thresh_big_overhang,
+                [&outlines_below_near, layer_nr = cluster.min_layer - 1](const BoundingBox& box) { return outlines_below_near(layer_nr, box); });
             for (auto it = cluster.layer_overhangs.begin(); it != cluster.layer_overhangs.end(); it++) {
                 int       layer_nr = it->first;
                 ExPolygons overhangs = it->second;
@@ -1242,7 +1321,7 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
         ExPolygons sharp_tail_overhangs;
         if (lower_layer == nullptr)
             sharp_tail_overhangs = layer->sharp_tails;
-        else {
+        else if (!layer->sharp_tails_height.empty()) {
             ExPolygons lower_layer_expanded = offset_ex(lower_layer->lslices_extrudable, SCALED_RESOLUTION);
             for (size_t i = 0; i < layer->sharp_tails_height.size();i++) {
                 ExPolygons areas = diff_clipped({ layer->sharp_tails[i]}, lower_layer_expanded);
@@ -1314,6 +1393,25 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
         // add sharp tail overhangs via add_overhang (with SharpTail type)
         for (const auto& area : sharp_tail_overhangs) {
             add_overhang(layer, area, OverhangType::SharpTail);
+        }
+
+        // Overhangs found without a displacement map's texture can reach over the textured layer below, where the texture
+        // bulges out. Overhangs found with it never do, and the supports rely on it: keep them off the textured layer below.
+        if (!textured_slices.empty() && lower_layer != nullptr && layer_nr >= 1 && !layer->loverhangs_with_type.empty()) {
+            const ExPolygons&                      textured_below = textured_slices[layer_nr - 1].first;
+            std::vector<std::pair<ExPolygon, int>> clipped;
+            clipped.reserve(layer->loverhangs_with_type.size());
+            for (const auto& wt : layer->loverhangs_with_type) {
+                const Polygons below_near = ClipperUtils::clip_clipper_polygons_with_subject_bbox(textured_below,
+                    get_extents(wt.first).inflated(SCALED_EPSILON));
+                if (below_near.empty()) {
+                    clipped.emplace_back(wt);
+                    continue;
+                }
+                for (ExPolygon& part : diff_ex(wt.first, below_near))
+                    clipped.emplace_back(std::move(part), wt.second);
+            }
+            layer->loverhangs_with_type = std::move(clipped);
         }
 
         // rebuild loverhangs from loverhangs_with_type (for bridge removal + debug SVG + export)

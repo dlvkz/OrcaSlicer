@@ -10,6 +10,7 @@
 #include <optional>
 
 #include "GLToolbar.hpp"
+#include "DisplacementPreview.hpp"
 #include "GLPickingBuffer.hpp"
 #include "Event.hpp"
 #include "Selection.hpp"
@@ -623,6 +624,7 @@ private:
     wxTimer m_timer;
     wxTimer m_timer_set_color;
     LayersEditing m_layers_editing;
+    DisplacementPreview m_displacement_preview;
     Mouse m_mouse;
     GLGizmosManager m_gizmos;
     //BBS: GUI refactor: GLToolbar

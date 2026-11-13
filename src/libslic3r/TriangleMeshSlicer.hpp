@@ -33,6 +33,9 @@ struct MeshSlicingParams
     SlicingMode   mode_below { SlicingMode::Regular };
     // Transforming faces during the slicing.
     Transform3d   trafo { Transform3d::Identity() };
+    // Above 0 (mm): outlines that stay open (a surface with no thickness, or a shell with holes too wide to close) are
+    // kept as bands this wide, and closed outlines thinner than this are grown to it. 0: open outlines are dropped.
+    float         open_surface_width { 0 };
 };
 
 struct MeshSlicingParamsEx : public MeshSlicingParams

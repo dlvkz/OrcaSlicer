@@ -14,6 +14,7 @@
 #include "libslic3r/Exception.hpp"
 
 #include "FuzzySkin.hpp"
+#include "SurfacePattern.hpp"
 
 namespace Slic3r::Feature::FuzzySkin {
 
@@ -24,28 +25,42 @@ static constexpr double STEEP_HORIZONTAL_SQ = 0.5;
 bool uses_surface_displacement(const PrintRegionConfig& config)
 {
     return config.fuzzy_skin.value != FuzzySkinType::None && config.fuzzy_skin_noise_type.value == NoiseType::DisplacementMap &&
-           config.fuzzy_skin_texture_surface.value && config.fuzzy_skin_thickness.value > 0.;
+           config.fuzzy_skin_thickness.value > 0.;
 }
 
-std::optional<SurfaceDisplacement> surface_displacement(const PrintRegionConfig& config)
+std::optional<SurfaceDisplacement> surface_displacement(const PrintRegionConfig& config, const Vec3d& object_size,
+                                                        const std::string& uv_source)
 {
     if (!uses_surface_displacement(config))
         return std::nullopt;
     std::string error;
-    auto        map = load_displacement_map(config.fuzzy_skin_texture.value, &error, false);
+    auto        map = load_texture(config, &error, false);
     if (!map)
         throw Slic3r::SlicingError("Fuzzy skin displacement map: " + error);
+    std::shared_ptr<const UVMesh> uv_mesh;
+    if (config.fuzzy_skin_texture_projection.value == FuzzySkinTextureProjection::UV) {
+        uv_mesh = load_uv_mesh(uv_source.empty() ? config.fuzzy_skin_texture_uv_mesh.value : uv_source, &error, false);
+        if (!uv_mesh)
+            throw Slic3r::SlicingError("Fuzzy skin displacement map UV mesh: " + error);
+    }
+    const bool per_layer = !config.fuzzy_skin_texture_surface.value;
     return SurfaceDisplacement{std::move(map),
-                               config.fuzzy_skin_texture_projection.value,
-                               config.fuzzy_skin_texture_size.value,
+                               texture_mapping(config, object_size),
                                config.fuzzy_skin_thickness.value,
                                std::max(0.02, config.fuzzy_skin_point_distance.value),
-                               config.fuzzy_skin_first_layer.value};
+                               config.fuzzy_skin_first_layer.value,
+                               std::move(uv_mesh),
+                               config.fuzzy_skin_texture_smooth_support.value && !per_layer,
+                               config.fuzzy_skin_texture_pattern.value,
+                               per_layer};
 }
 
 double surface_displacement_height_margin(const PrintRegionConfig& config)
 {
-    return uses_surface_displacement(config) ? config.fuzzy_skin_thickness.value : 0.;
+    // Per layer, nothing rises above the top. The offset sets how far the surface goes out: twice the depth at 1.
+    return uses_surface_displacement(config) && config.fuzzy_skin_texture_surface.value ?
+               2. * std::clamp(config.fuzzy_skin_texture_offset.value, 0., 1.) * config.fuzzy_skin_thickness.value :
+               0.;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -147,6 +162,72 @@ struct ShallowPlane
     double     height(double x, double y) const { return -(normal.x() * x + normal.y() * y + offset) / normal.z(); }
 };
 
+// The displacement in mm at a point of the surface with outward unit normal n.
+class Sampler
+{
+public:
+    Sampler(const SurfaceDisplacement& sd, const indexed_triangle_set& its, const Transform3d& trafo, const Mesh& mesh) : m_sd(sd)
+    {
+        if (sd.mapping.projection == FuzzySkinTextureProjection::OnSurface) {
+            m_pattern = std::make_unique<SurfacePattern>(sd.pattern, sd.mapping.size, mesh.vertices, mesh.faces);
+            m_pattern->set_map(sd.map, sd.mapping.rotation);
+            return;
+        }
+        if (sd.mapping.projection != FuzzySkinTextureProjection::UV || !sd.uv_mesh)
+            return;
+        // Fit the UV mesh's bounding box to the part's, axis by axis, then move it with the part.
+        const UVMesh& uv      = *sd.uv_mesh;
+        Vec3d         its_min = its.vertices.front().cast<double>(), its_max = its_min;
+        for (const stl_vertex& v : its.vertices) {
+            its_min = its_min.cwiseMin(v.cast<double>());
+            its_max = its_max.cwiseMax(v.cast<double>());
+        }
+        const Vec3d uv_size = uv.max - uv.min, its_size = its_max - its_min;
+        Vec3d       scale;
+        for (int k = 0; k < 3; ++k)
+            scale(k) = uv_size(k) > 1e-9 ? its_size(k) / uv_size(k) : 1.;
+        m_vertices.reserve(uv.vertices.size());
+        for (const Vec3d& v : uv.vertices)
+            m_vertices.emplace_back(trafo * Vec3d(its_min + (v - uv.min).cwiseProduct(scale)));
+        m_tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(m_vertices, uv.faces);
+    }
+
+    double operator()(const Vec3d& p, const Vec3d& n) const
+    {
+        if (m_pattern) {
+            return signed_height(m_sd.mapping, m_pattern->value(p, n)) * m_sd.depth;
+        }
+        if (m_sd.mapping.projection != FuzzySkinTextureProjection::UV)
+            return displacement_map_value(*m_sd.map, m_sd.mapping, p, n) * m_sd.depth;
+        if (m_vertices.empty())
+            return 0.;
+        const UVMesh& uv  = *m_sd.uv_mesh;
+        size_t        hit = 0;
+        Vec3d         q;
+        if (AABBTreeIndirect::squared_distance_to_indexed_triangle_set(m_vertices, uv.faces, m_tree, p, hit, q) < 0.)
+            return 0.;
+        // Barycentric coordinates of the closest point, to interpolate the corners' texture coordinates.
+        const stl_triangle_vertex_indices& f = uv.faces[hit];
+        const Vec3d &a = m_vertices[f(0)], &b = m_vertices[f(1)], &c = m_vertices[f(2)];
+        const Vec3d  e0 = b - a, e1 = c - a, e2 = q - a;
+        const double d00 = e0.dot(e0), d01 = e0.dot(e1), d11 = e1.dot(e1), d20 = e2.dot(e0), d21 = e2.dot(e1);
+        const double den = d00 * d11 - d01 * d01;
+        double       wb = 0., wc = 0.;
+        if (std::abs(den) > 1e-18) {
+            wb = std::clamp((d11 * d20 - d01 * d21) / den, 0., 1.);
+            wc = std::clamp((d00 * d21 - d01 * d20) / den, 0., 1. - wb);
+        }
+        const Vec2d t = uv.uvs[3 * hit] * (1. - wb - wc) + uv.uvs[3 * hit + 1] * wb + uv.uvs[3 * hit + 2] * wc;
+        return signed_height(m_sd.mapping, m_sd.map->sample(t.x(), t.y())) * m_sd.depth;
+    }
+
+private:
+    const SurfaceDisplacement&        m_sd;
+    std::unique_ptr<SurfacePattern>   m_pattern;
+    std::vector<Vec3d>                m_vertices;
+    AABBTreeIndirect::Tree<3, double> m_tree;
+};
+
 Mesh transformed_mesh(const indexed_triangle_set& its, const Transform3d& trafo)
 {
     Mesh mesh;
@@ -206,7 +287,7 @@ std::vector<ShallowPlane> shallow_planes(const Mesh& mesh)
 }
 
 // The outline of one layer, moved sideways where it lies on a steep face.
-Polygon displace_ring(const Polygon& ring, double z, const Mesh& mesh, const SurfaceDisplacement& sd)
+Polygon displace_ring(const Polygon& ring, double z, const Mesh& mesh, const SurfaceDisplacement& sd, const Sampler& sampler)
 {
     const double step = scale_(sd.spacing);
     Points       out;
@@ -237,8 +318,8 @@ Polygon displace_ring(const Polygon& ring, double z, const Mesh& mesh, const Sur
                 continue;
             }
             // The surface point that, moved by d along its normal, lands in this layer sits d * nz lower.
-            double d = displacement_map_value(*sd.map, sd.projection, sd.size, p, nrm) * sd.depth;
-            d        = displacement_map_value(*sd.map, sd.projection, sd.size, Vec3d(p.x(), p.y(), z - d * nrm.z()), nrm) * sd.depth;
+            double d = sampler(p, nrm);
+            d        = sampler(Vec3d(p.x(), p.y(), z - d * nrm.z()), nrm);
             // A surface offset by d along its normal crosses the layer d / sin(slope) further out.
             const Vec2d shift = Vec2d(nrm.x(), nrm.y()) * (d / nh2) / SCALING_FACTOR;
             out.emplace_back((q + shift).cast<coord_t>());
@@ -247,11 +328,36 @@ Polygon displace_ring(const Polygon& ring, double z, const Mesh& mesh, const Sur
     return Polygon(std::move(out));
 }
 
+// Per layer only: the outline moved sideways along its own outward normal by the texture at each point of the layer.
+// Contours run counter-clockwise and holes clockwise, so the material is on the left of either and outwards is right.
+Polygon displace_ring_per_layer(const Polygon& ring, double z, const SurfaceDisplacement& sd, const Sampler& sampler)
+{
+    const double step = scale_(sd.spacing);
+    Points       out;
+    out.reserve(size_t(ring.length() / step) + ring.points.size());
+    const size_t n = ring.points.size();
+    for (size_t i = 0; i < n; ++i) {
+        const Vec2d  a   = ring.points[i].cast<double>();
+        const Vec2d  b   = ring.points[(i + 1) % n].cast<double>();
+        const double len = (b - a).norm();
+        if (len < 1.)
+            continue;
+        const Vec2d nrm = Vec2d(b.y() - a.y(), a.x() - b.x()) / len;
+        const int   k   = std::max(1, int(std::ceil(len / step)));
+        for (int j = 0; j < k; ++j) {
+            const Vec2d  q = a + (b - a) * ((double(j) + 0.5) / double(k));
+            const double d = sampler(Vec3d(unscale<double>(q.x()), unscale<double>(q.y()), z), Vec3d(nrm.x(), nrm.y(), 0.));
+            out.emplace_back((q + nrm * (d / SCALING_FACTOR)).cast<coord_t>());
+        }
+    }
+    return Polygon(std::move(out));
+}
+
 // The parts of a flat or shallow plane's footprint that the displacement adds to or cuts from the layer at z.
-void displace_plane(const ShallowPlane& plane, double z, const SurfaceDisplacement& sd, Polygons& add, Polygons& cut)
+void displace_plane(const ShallowPlane& plane, double z, const SurfaceDisplacement& sd, const Sampler& sampler, Polygons& add, Polygons& cut)
 {
     const double nz    = std::abs(plane.normal.z());
-    const double reach = sd.depth / nz;
+    const double reach = max_reach(sd.mapping) * sd.depth / nz;
     if (z < plane.zmin - reach || z > plane.zmax + reach)
         return;
     const bool up = plane.normal.z() > 0.;
@@ -273,7 +379,7 @@ void displace_plane(const ShallowPlane& plane, double z, const SurfaceDisplaceme
         for (size_t c = 1; c + 1 < cols; ++c) {
             const double x = x0 + double(c) * step, y = y0 + double(r) * step;
             const double hz = plane.height(x, y);
-            const double v  = displacement_map_value(*sd.map, sd.projection, sd.size, Vec3d(x, y, hz), plane.normal) * sd.depth / nz;
+            const double v  = sampler(Vec3d(x, y, hz), plane.normal) / nz;
             // A top holds material below it, raised by v; a bottom holds material above it, lowered by v.
             displaced[r * cols + c] = float(up ? hz + v - z : z - (hz - v));
             if (!plane.flat)
@@ -303,7 +409,9 @@ void displace_slices(const indexed_triangle_set&  its,
     if (its.indices.empty() || zs.empty() || layers.size() != zs.size())
         return;
     const Mesh                      mesh   = transformed_mesh(its, trafo);
-    const std::vector<ShallowPlane> planes = shallow_planes(mesh);
+    // Per layer, flat and shallow faces stay as they are.
+    const std::vector<ShallowPlane> planes = sd.per_layer ? std::vector<ShallowPlane>{} : shallow_planes(mesh);
+    const Sampler                   sampler(sd, its, trafo, mesh);
 
     tbb::parallel_for(tbb::blocked_range<size_t>(0, zs.size()), [&](const tbb::blocked_range<size_t>& range) {
         for (size_t i = range.begin(); i < range.end(); ++i) {
@@ -311,7 +419,7 @@ void displace_slices(const indexed_triangle_set&  its,
             const double z = zs[i];
             Polygons     add, cut;
             for (const ShallowPlane& plane : planes)
-                displace_plane(plane, z, sd, add, cut);
+                displace_plane(plane, z, sd, sampler, add, cut);
             ExPolygons& layer = layers[i];
             if (layer.empty() && add.empty())
                 continue;
@@ -319,9 +427,12 @@ void displace_slices(const indexed_triangle_set&  its,
             Polygons rings;
             const bool walls = sd.first_layer || i > 0;
             for (const ExPolygon& expoly : layer) {
-                rings.emplace_back(walls ? displace_ring(expoly.contour, z, mesh, sd) : expoly.contour);
+                auto displaced = [&](const Polygon& ring) {
+                    return sd.per_layer ? displace_ring_per_layer(ring, z, sd, sampler) : displace_ring(ring, z, mesh, sd, sampler);
+                };
+                rings.emplace_back(walls ? displaced(expoly.contour) : expoly.contour);
                 for (const Polygon& hole : expoly.holes)
-                    rings.emplace_back(walls ? displace_ring(hole, z, mesh, sd) : hole);
+                    rings.emplace_back(walls ? displaced(hole) : hole);
             }
             // Contours counter-clockwise and holes clockwise: the positive union restores the islands and their holes, and
             // drops the small reversed loops where outlines moved inwards cross at a corner.

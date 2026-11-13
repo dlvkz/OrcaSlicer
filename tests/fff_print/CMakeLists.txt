@@ -26,6 +26,7 @@ add_executable(${_TEST_NAME}_tests
 	test_adaptive_pa.cpp
 	test_wipe_tower.cpp
 	test_fuzzy_skin_map.cpp
+	test_texture_relief.cpp
 	)
 find_package(JPEG REQUIRED)
 find_package(PNG REQUIRED)

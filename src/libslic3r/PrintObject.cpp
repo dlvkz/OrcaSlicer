@@ -892,9 +892,11 @@ static bool surface_displacement_in(const ConfigOptionResolver &config)
 {
     const ConfigOption *type = config.option("fuzzy_skin"), *noise = config.option("fuzzy_skin_noise_type"),
                        *surface = config.option("fuzzy_skin_texture_surface"), *thickness = config.option("fuzzy_skin_thickness");
-    return type != nullptr && noise != nullptr && surface != nullptr && thickness != nullptr &&
+    // Whole surface or per layer, the map is applied while slicing.
+    (void) surface;
+    return type != nullptr && noise != nullptr && thickness != nullptr &&
            type->getInt() != int(FuzzySkinType::None) && noise->getInt() == int(NoiseType::DisplacementMap) &&
-           surface->getBool() && thickness->getFloat() > 0.;
+           thickness->getFloat() > 0.;
 }
 
 bool PrintObject::invalidate_state_by_config_options(
@@ -985,6 +987,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "raft_layers"
             || opt_key == "raft_contact_distance"
             || opt_key == "slice_closing_radius"
+            || opt_key == "open_surface_thickness"
             || opt_key == "slicing_mode"
             || opt_key == "slowdown_for_curled_perimeters"
             || opt_key == "make_overhang_printable"
@@ -1195,9 +1198,15 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "fuzzy_skin_octaves"
             || opt_key == "fuzzy_skin_persistence"
             || opt_key == "fuzzy_skin_texture"
+            || opt_key == "fuzzy_skin_texture_pattern"
+            || opt_key == "fuzzy_skin_texture_rotation"
+            || opt_key == "fuzzy_skin_texture_invert"
+            || opt_key == "fuzzy_skin_texture_offset"
             || opt_key == "fuzzy_skin_texture_projection"
             || opt_key == "fuzzy_skin_texture_size"
+            || opt_key == "fuzzy_skin_texture_uv_mesh"
             || opt_key == "fuzzy_skin_texture_surface"
+            || opt_key == "fuzzy_skin_texture_smooth_support"
             || opt_key == "detect_overhang_wall"
             || opt_key == "overhang_reverse"
             || opt_key == "overhang_reverse_internal_only"
@@ -3325,11 +3334,22 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
         config.fuzzy_skin.value = FuzzySkinType::None;
     if (config.fuzzy_skin_noise_type.value != NoiseType::DisplacementMap) {
         // Keep regions that only differ in unused displacement map settings in one group.
+        config.fuzzy_skin_texture_pattern.value    = FuzzySkinTexturePattern::Image;
         config.fuzzy_skin_texture.value.clear();
         config.fuzzy_skin_texture_projection.value = FuzzySkinTextureProjection::Box;
         config.fuzzy_skin_texture_size.value       = 20.;
+        config.fuzzy_skin_texture_rotation.value   = 0.;
+        config.fuzzy_skin_texture_invert.value     = false;
+        config.fuzzy_skin_texture_offset.value     = 0.5;
+        config.fuzzy_skin_texture_uv_mesh.value.clear();
         config.fuzzy_skin_texture_surface.value    = true;
     }
+    if (config.fuzzy_skin_noise_type.value != NoiseType::DisplacementMap || !config.fuzzy_skin_texture_surface.value)
+        config.fuzzy_skin_texture_smooth_support.value = false;
+    if (config.fuzzy_skin_texture_projection.value != FuzzySkinTextureProjection::UV)
+        config.fuzzy_skin_texture_uv_mesh.value.clear();
+    if (config.fuzzy_skin_texture_pattern.value != FuzzySkinTexturePattern::Image)
+        config.fuzzy_skin_texture.value.clear();
     return config;
 }
 

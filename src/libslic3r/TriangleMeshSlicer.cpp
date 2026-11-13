@@ -12,6 +12,8 @@
 #include <deque>
 #include <queue>
 #include <mutex>
+#include <tuple>
+#include <limits>
 #include <utility>
 
 #include <boost/log/trivial.hpp>
@@ -145,6 +147,21 @@ public:
 };
 
 using IntersectionLines = std::vector<IntersectionLine>;
+
+// The lines of a layer are collected from the faces in parallel, so they arrive in a different order every time. On a
+// mesh that is not manifold (edges shared by more than two faces, overlapping shells) the loops chained from them
+// depend on that order, and a layer could lose or gain islands from one slicing to the next. Sorting them makes the
+// result repeatable.
+static void sort_intersection_lines(std::vector<IntersectionLines> &layers)
+{
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, layers.size()), [&layers](const tbb::blocked_range<size_t> &range) {
+        for (size_t i = range.begin(); i < range.end(); ++ i)
+            std::sort(layers[i].begin(), layers[i].end(), [](const IntersectionLine &l, const IntersectionLine &r) {
+                return std::make_tuple(l.a_id, l.b_id, l.edge_a_id, l.edge_b_id, l.a.x(), l.a.y(), l.b.x(), l.b.y(), l.flags) <
+                       std::make_tuple(r.a_id, r.b_id, r.edge_a_id, r.edge_b_id, r.a.x(), r.a.y(), r.b.x(), r.b.y(), r.flags);
+            });
+    });
+}
 
 enum class FacetSliceType {
     NoSlice = 0,
@@ -528,6 +545,7 @@ static inline std::vector<IntersectionLines> slice_make_lines(
             }
         }
     );
+    sort_intersection_lines(lines);
     return lines;
 }
 
@@ -971,6 +989,10 @@ inline std::pair<SlabLines, SlabLines> slice_slabs_make_lines(
             }
         }
     );
+    for (SlabLines *slab : { &lines_top, &lines_bottom }) {
+        sort_intersection_lines(slab->at_slice);
+        sort_intersection_lines(slab->between_slices);
+    }
     return out;
 }
 
@@ -1380,9 +1402,111 @@ static void chain_open_polylines_close_gaps(std::vector<OpenPolyline> &open_poly
     }
 }
 
+// Holes in a mesh wider than the gaps closed above leave whole outlines open, and an open outline is dropped, so a layer
+// of a model with holes (scans, generated meshes) loses islands. This last pass chains what is left across wider gaps,
+// nearest end first, and keeps a chain only if it closes and all its jumps together are short next to the outline
+// (max_jump_ratio of its length): a body outline broken by a few holes passes, an open sheet (a cape, a single wall)
+// would need a jump as long as itself and stays open, so it is not filled into a solid web. The loop keeps the direction
+// most of its length runs in, so holes stay holes.
+static void chain_open_polylines_close_wide_gaps(std::vector<OpenPolyline> &open_polylines, Polygons &loops, double max_gap, double max_jump_ratio)
+{
+    const double max_gap_scaled = scale_(max_gap);
+    std::vector<OpenPolyline*> pieces = open_polylines_sorted(open_polylines, true);
+    pieces.erase(std::remove_if(pieces.begin(), pieces.end(), [](const OpenPolyline *p) { return p->points.size() < 2; }), pieces.end());
+    std::vector<bool> used(pieces.size(), false);
+    for (size_t seed = 0; seed < pieces.size(); ++ seed) {
+        if (used[seed])
+            continue;
+        std::vector<std::pair<size_t, bool>> chain { { seed, false } }; // piece, reversed
+        std::vector<bool> in_chain(pieces.size(), false);
+        in_chain[seed] = true;
+        Point  chain_start = pieces[seed]->points.front();
+        Point  chain_end   = pieces[seed]->points.back();
+        double length = pieces[seed]->length, jumps = 0.;
+        bool   closed = false;
+        for (;;) {
+            const double close_dist = (chain_end - chain_start).cast<double>().norm();
+            double best = std::numeric_limits<double>::max();
+            size_t best_idx = 0;
+            bool   best_rev = false;
+            for (size_t i = 0; i < pieces.size(); ++ i)
+                if (! used[i] && ! in_chain[i]) {
+                    const double ds = (pieces[i]->points.front() - chain_end).cast<double>().norm();
+                    const double de = (pieces[i]->points.back()  - chain_end).cast<double>().norm();
+                    if (ds < best) { best = ds; best_idx = i; best_rev = false; }
+                    if (de < best) { best = de; best_idx = i; best_rev = true; }
+                }
+            if (close_dist <= max_gap_scaled && close_dist <= best) {
+                jumps += close_dist;
+                closed = true;
+                break;
+            }
+            if (best > max_gap_scaled)
+                break;
+            const OpenPolyline *p = pieces[best_idx];
+            chain.emplace_back(best_idx, best_rev);
+            in_chain[best_idx] = true;
+            jumps += best;
+            length += p->length;
+            chain_end = best_rev ? p->points.front() : p->points.back();
+        }
+        if (! closed || jumps > max_jump_ratio * length)
+            continue;
+        Polygon poly;
+        double  forward = 0., backward = 0.;
+        for (const auto &[idx, rev] : chain) {
+            const Points &pts = pieces[idx]->points;
+            if (rev)
+                poly.points.insert(poly.points.end(), pts.rbegin(), pts.rend());
+            else
+                poly.points.insert(poly.points.end(), pts.begin(), pts.end());
+            (rev ? backward : forward) += pieces[idx]->length;
+        }
+        if (poly.points.size() < 3)
+            continue;
+        if (backward > forward)
+            poly.reverse();
+        for (const auto &[idx, rev] : chain) {
+            used[idx] = true;
+            pieces[idx]->consumed = true;
+            pieces[idx]->points.clear();
+        }
+        loops.emplace_back(std::move(poly));
+    }
+}
+
+// Generated and scanned models have surfaces with no thickness (a cape, a single wall) and closed shells thinner than a
+// line; neither prints. Give them width: open outlines become bands of that width around them, thin closed outlines
+// (positive, so not holes) grow to it. Tiny pieces (shorter than the width) are left out: they are noise.
+static void thicken_open_and_thin(Polygons &loops, const std::vector<OpenPolyline> &open_polylines, double width)
+{
+    const double w = scale_(width);
+    for (Polygon &loop : loops) {
+        const double area = loop.area();
+        if (area <= 0.)
+            continue;
+        const double perimeter = loop.length();
+        // A strip of thickness t and length L has area t * L and perimeter about 2 L.
+        const double thickness = 2. * area / perimeter;
+        if (thickness >= w || perimeter < 2. * w)
+            continue;
+        Polygons grown = offset(loop, float(0.5 * (w - thickness)));
+        if (grown.empty())
+            continue;
+        loop = std::move(grown.front());
+        for (size_t i = 1; i < grown.size(); ++ i)
+            loops.emplace_back(std::move(grown[i]));
+    }
+    for (const OpenPolyline &pl : open_polylines)
+        if (pl.points.size() >= 2 && Slic3r::length(pl.points) >= w)
+            append(loops, offset(Polyline(pl.points), float(0.5 * w)));
+}
+
 static Polygons make_loops(
     // Lines will have their flags modified.
-    IntersectionLines   &lines)
+    IntersectionLines   &lines,
+    // Above 0 (mm), see thicken_open_and_thin().
+    double               open_surface_width = 0.)
 {
     Polygons loops;
 #if 0
@@ -1460,6 +1584,10 @@ static Polygons make_loops(
     chain_open_polylines_close_gaps(open_polylines, loops, max_gap, false);
     chain_open_polylines_close_gaps(open_polylines, loops, max_gap, true);
 #endif
+    // Outlines broken by larger holes in the mesh: jumps up to 10 mm, at most 15% of the outline together.
+    chain_open_polylines_close_wide_gaps(open_polylines, loops, 10., 0.15);
+    if (open_surface_width > 0.)
+        thicken_open_and_thin(loops, open_polylines, open_surface_width);
 
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
     {
@@ -1497,7 +1625,7 @@ static std::vector<Polygons> make_loops(
                     throw_on_cancel();
 
                 Polygons &polygons = layers[line_idx];
-                polygons = make_loops(lines[line_idx]);
+                polygons = make_loops(lines[line_idx], params.open_surface_width);
 
                 auto this_mode = line_idx < params.slicing_mode_normal_below_layer ? params.mode_below : params.mode;
                 if (! polygons.empty()) {

@@ -240,6 +240,45 @@ public:
     EHoverState         	hover;
 
     GUI::GLModel            model;
+
+    // Fuzzy skin displacement map shown on the surface as shading, before slicing. Filled in by the 3D editor canvas
+    // before rendering, read by GLVolumeCollection::render().
+    struct DisplacementPreview
+    {
+        bool         active{ false };
+        bool         walls_only{ false }; // only steep faces are displaced (whole-surface mode off)
+        bool         displaced{ false };  // draw displacement_mesh_model as patches; the tessellation shader splits and moves them
+        unsigned int texture{ 0 };
+        int          projection{ 0 };     // FuzzySkinTextureProjection: 0 box, 1 cylindrical, 2 UV, 3-5 planar, 6 spherical, 7 on the surface
+        float        size{ 20.f };        // tile width, mm
+        float        rotation{ 0.f };     // degrees, counter-clockwise
+        bool         invert{ false };
+        float        midlevel{ 0.5f };    // the map value that leaves the surface in place: 1 - fuzzy_skin_texture_offset
+        float        tiles_around{ 1.f }; // cylindrical, spherical: tiles once around the object
+        float        center_z{ 0.f };     // spherical: height of the object's middle, mm
+        float        aspect{ 1.f };       // image rows / columns
+        float        depth{ 0.f };        // mm
+        Vec2f        center{ Vec2f::Zero() }; // XY centre of the object's bounding box, where the projections are centred
+        // On the surface (Feature/FuzzySkin/SurfacePattern): the sites laid over this part and their lookup, in the part's
+        // world coordinates less offset.
+        int          pattern{ 0 };        // FuzzySkinTexturePattern
+        unsigned int sites_texture{ 0 };  // RGBA32F: position, tag
+        unsigned int buckets_texture{ 0 }; // RG32F: first site, count
+        int          bucket_mask{ 0 };
+        float        cell{ 1.f };
+        Vec3f        origin{ Vec3f::Zero() };
+        Vec3f        offset{ Vec3f::Zero() };
+        Vec2f        noise_range{ 0.f, 1.f };
+    };
+    DisplacementPreview     displacement_preview;
+    // The model with texture coordinates for the UV projection, and what it was built from.
+    GUI::GLModel            displacement_uv_model;
+    const void*             displacement_uv_source{ nullptr };
+    const void*             displacement_uv_mesh_source{ nullptr };
+    // The mesh split finely enough for the shader to move its vertices, and what it was split from (DisplacementPreview).
+    GUI::GLModel            displacement_mesh_model;
+    size_t                  displacement_mesh_key{ 0 };
+
     // raycaster used for picking
     std::unique_ptr<GUI::MeshRaycaster> mesh_raycaster;
     // BBS

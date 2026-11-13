@@ -335,6 +335,13 @@ if (SLIC3R_SENTRY AND NOT SENTRY_FOUND)
     set(SENTRY_PKG dep_Sentry)
 endif()
 
+option(DEP_TEXT2HEIGHT "Build stable-diffusion.cpp for the text to height map feature" OFF)
+set(TEXT2HEIGHT_PKG "")
+if (DEP_TEXT2HEIGHT)
+    include(StableDiffusionCpp/StableDiffusionCpp.cmake)
+    set(TEXT2HEIGHT_PKG dep_StableDiffusionCpp)
+endif ()
+
 set(JPEG_PKG "")
 if (NOT JPEG_FOUND)
     include(JPEG/JPEG.cmake)
@@ -391,6 +398,7 @@ set(_dep_list
     ${ZLIB_PKG}
     ${EXPAT_PKG}
     dep_libnoise
+    ${TEXT2HEIGHT_PKG}
     )
 
 if (MSVC)

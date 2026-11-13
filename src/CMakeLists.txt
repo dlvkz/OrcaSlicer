@@ -379,6 +379,8 @@ else ()
     add_executable(Snapmaker_Orca Snapmaker_Orca.cpp Snapmaker_Orca.hpp)
 endif ()
 
+slic3r_copy_text2height_libs(Snapmaker_Orca)
+
 if (MINGW)
     target_link_options(Snapmaker_Orca PUBLIC "-Wl,-allow-multiple-definition")
     set_target_properties(Snapmaker_Orca PROPERTIES PREFIX "")

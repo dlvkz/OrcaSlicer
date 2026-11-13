@@ -22,6 +22,7 @@
 #include "Model.hpp"
 #include "format.hpp"
 #include "Feature/FuzzySkin/FuzzySkin.hpp"
+#include "Feature/FuzzySkin/SurfacePattern.hpp"
 #include <float.h>
 
 #include <algorithm>
@@ -1962,14 +1963,40 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                     if (!validate_extrusion_width(region.config(), opt_key, layer_height, err_msg))
 		            	return  {err_msg, object, opt_key};
 
-            // A fuzzy skin displacement map must be a readable image. Loading it here also picks up an edited image.
+            // A fuzzy skin displacement map must be a readable image or a known pattern. Loading it here also picks up an edited image.
             for (const PrintRegion &region : object->all_regions()) {
                 const PrintRegionConfig &region_config = region.config();
                 if (region_config.fuzzy_skin.value == FuzzySkinType::None || region_config.fuzzy_skin_noise_type.value != NoiseType::DisplacementMap)
                     continue;
                 std::string map_error;
-                if (!Feature::FuzzySkin::load_displacement_map(region_config.fuzzy_skin_texture.value, &map_error, true))
-                    return {Slic3r::format(_u8L("Fuzzy skin displacement map: %1%"), map_error), object, "fuzzy_skin_texture"};
+                if (!Feature::FuzzySkin::load_texture(region_config, &map_error, true))
+                    return {Slic3r::format(_u8L("Fuzzy skin displacement map: %1%"), map_error), object,
+                            region_config.fuzzy_skin_texture_pattern.value == FuzzySkinTexturePattern::Image ? "fuzzy_skin_texture" :
+                                                                                                               "fuzzy_skin_texture_pattern"};
+                if (region_config.fuzzy_skin_texture_projection.value == FuzzySkinTextureProjection::UV &&
+                    !region_config.fuzzy_skin_texture_uv_mesh.value.empty()) {
+                    if (!Feature::FuzzySkin::load_uv_mesh(region_config.fuzzy_skin_texture_uv_mesh.value, &map_error, true))
+                        return {Slic3r::format(_u8L("Fuzzy skin displacement map UV mesh: %1%"), map_error), object, "fuzzy_skin_texture_uv_mesh"};
+                }
+            }
+            // UV without a UV mesh: each part with that region takes the texture coordinates of the file it was loaded from.
+            if (const PrintObjectRegions *regions = object->shared_regions(); regions != nullptr) {
+                for (const PrintObjectRegions::LayerRangeRegions &range : regions->layer_ranges)
+                    for (const PrintObjectRegions::VolumeRegion &vr : range.volume_regions) {
+                        if (vr.parent != -1 || vr.region == nullptr || vr.model_volume == nullptr || !vr.model_volume->is_model_part())
+                            continue;
+                        const PrintRegionConfig &rc = vr.region->config();
+                        if (rc.fuzzy_skin.value == FuzzySkinType::None || rc.fuzzy_skin_noise_type.value != NoiseType::DisplacementMap ||
+                            rc.fuzzy_skin_texture_projection.value != FuzzySkinTextureProjection::UV || !rc.fuzzy_skin_texture_uv_mesh.value.empty())
+                            continue;
+                        std::string  uv_error;
+                        const std::string source = Feature::FuzzySkin::uv_mesh_source({}, vr.model_volume->source.input_file,
+                                                                                      vr.model_volume->get_object()->input_file);
+                        if (!Feature::FuzzySkin::load_uv_mesh(source, &uv_error, true))
+                            return {Slic3r::format(_u8L("Fuzzy skin displacement map, UV projection of \"%1%\": %2%. Set a UV mesh, or pick another projection."),
+                                                   vr.model_volume->name, uv_error),
+                                    object, "fuzzy_skin_texture_uv_mesh"};
+                    }
             }
         }
     }

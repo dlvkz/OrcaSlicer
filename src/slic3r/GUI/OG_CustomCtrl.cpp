@@ -244,7 +244,13 @@ wxPoint OG_CustomCtrl::get_pos(const Line& line, Field* field_in/* = nullptr*/)
                     correct_horiz_pos(h_pos, field);
                     break;
                 }
-                if (opt_group->split_multi_line) {// BBS
+                if (field_in == nullptr && option_set.size() == 1 && opt_group->split_multi_line) {
+                    // The line's extra widgets (field_in == nullptr) go right of a single field. Moving down as for a
+                    // split multi-option line put them over the next line.
+                    h_pos += field->getWindow()->GetSize().x + m_h_gap;
+                    if (!field->combine_side_text() && (!opt.opt.sidetext.empty() || opt_group->sidetext_width > 0))
+                        h_pos += opt_group->sidetext_width * m_em_unit + m_h_gap;
+                } else if (opt_group->split_multi_line) {// BBS
                     v_pos += (ctrl_line.height - m_v_gap + m_v_gap2) / option_set.size();
                 } else {
                     // BBS: new layout

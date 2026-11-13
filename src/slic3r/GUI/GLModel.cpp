@@ -634,6 +634,7 @@ static GLenum get_primitive_mode(const GLModel::Geometry::Format& format)
     case GLModel::Geometry::EPrimitiveType::Lines:         { return GL_LINES; }
     case GLModel::Geometry::EPrimitiveType::LineStrip:     { return GL_LINE_STRIP; }
     case GLModel::Geometry::EPrimitiveType::LineLoop:      { return GL_LINE_LOOP; }
+    case GLModel::Geometry::EPrimitiveType::Patches:       { return GL_PATCHES; }
     }
 }
 
@@ -729,6 +730,8 @@ void GLModel::RenderLegacy(const std::pair<size_t, size_t>& range, GLShaderProgr
 
     shader->set_uniform("uniform_color", data.color);
 
+    if (mode == GL_PATCHES)
+        glsafe(::glPatchParameteri(GL_PATCH_VERTICES, 3));
     glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_render_data.ibo_id));
     glsafe(::glDrawElements(mode, range.second - range.first, index_type, (const void*)(range.first * Geometry::index_stride_bytes(data))));
     glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
@@ -814,6 +817,8 @@ void GLModel::RenderVao(const std::pair<size_t, size_t>& range, GLShaderProgram*
 
     glsafe(::glBindVertexArray(m_render_data.vao_id));
 
+    if (mode == GL_PATCHES)
+        glsafe(::glPatchParameteri(GL_PATCH_VERTICES, 3));
     glsafe(::glDrawElements(mode, static_cast<GLsizei>(range.second - range.first), index_type,
                             reinterpret_cast<const void*>(range.first * Geometry::index_stride_bytes(data))));
 
