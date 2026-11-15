@@ -53,16 +53,46 @@ std::shared_ptr<const TexturedMesh> textured_mesh_of_volume(const ModelObject& o
     const double scale = sa.maxCoeff() > 0. ? sb.maxCoeff() / sa.maxCoeff() : 1.;
     const double tol   = 1e-3 * std::max(sb.maxCoeff(), 1e-6);
     const size_t n     = its.indices.size();
-    for (size_t k = 0; k < 64; ++k) {
-        const size_t f = (n * k) / 64;
-        for (int c = 0; c < 3; ++c) {
-            const Vec3d src = (tm->its.vertices[tm->its.indices[f](c)].cast<double>() - a.min) * scale + b.min;
-            const Vec3d dst = its.vertices[its.indices[f](c)].cast<double>();
-            if ((src - dst).norm() > tol)
-                return nullptr;
+    // Which corner of the source facet each corner of the volume's facet is. The importer reverses a facet's winding
+    // when it repairs the mesh (an inside-out model gets every facet reversed), so the corners may come in another order.
+    auto corner_order = [&](size_t f, std::array<int, 3>& order) {
+        static const std::array<std::array<int, 3>, 6> orders{{{0, 1, 2}, {0, 2, 1}, {1, 2, 0}, {2, 0, 1}, {1, 0, 2}, {2, 1, 0}}};
+        for (const std::array<int, 3>& o : orders) {
+            bool same = true;
+            for (int c = 0; c < 3 && same; ++c) {
+                const Vec3d src = (tm->its.vertices[tm->its.indices[f](o[c])].cast<double>() - a.min) * scale + b.min;
+                same            = (src - its.vertices[its.indices[f](c)].cast<double>()).norm() <= tol;
+            }
+            if (same) {
+                order = o;
+                return true;
+            }
+        }
+        return false;
+    };
+    std::vector<std::array<int, 3>> orders; // empty while every facet keeps its corner order
+    for (size_t f = 0; f < n; ++f) {
+        std::array<int, 3> o;
+        if (!corner_order(f, o))
+            return nullptr;
+        if (o != std::array<int, 3>{0, 1, 2}) {
+            if (orders.empty())
+                orders.assign(n, {0, 1, 2});
+            orders[f] = o;
         }
     }
-    return tm;
+    if (orders.empty())
+        return tm;
+    // A copy whose facets list their corners in the volume's order, so texture coordinate c belongs to vertex c.
+    auto reordered = std::make_shared<TexturedMesh>(*tm);
+    for (size_t f = 0; f < n; ++f) {
+        const std::array<int, 3>& o = orders[f];
+        for (int c = 0; c < 3; ++c) {
+            reordered->its.indices[f](c) = tm->its.indices[f](o[c]);
+            reordered->uvs[f][c]         = tm->uvs[f][o[c]];
+        }
+    }
+    return reordered;
 }
 
 bool has_normal_map(const ModelObject& object)

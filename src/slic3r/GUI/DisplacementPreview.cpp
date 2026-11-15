@@ -1,6 +1,7 @@
 #include "DisplacementPreview.hpp"
 
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <map>
 #include <unordered_map>
@@ -40,14 +41,14 @@ using Feature::FuzzySkin::UVMesh;
 
 namespace {
 
-// The part's triangles, one vertex per corner, with the texture coordinates of the UV mesh. The UV mesh is fitted to
-// the part by bounding box like the slicer does (SurfaceDisplacement), and each triangle takes its corners' coordinates
-// from the UV triangle closest to its centre, so seams in the texture layout stay sharp.
-void build_uv_model(GLModel& out, const indexed_triangle_set& its, const UVMesh& uv)
+// The texture coordinates of each of the part's triangles' corners. The UV mesh is fitted to the part by bounding box
+// like the slicer does (SurfaceDisplacement), and each triangle takes its corners' coordinates from the UV triangle
+// closest to its centre, so seams in the texture layout stay sharp.
+std::vector<std::array<Vec2f, 3>> corner_uvs(const indexed_triangle_set& its, const UVMesh& uv)
 {
-    out.reset();
+    std::vector<std::array<Vec2f, 3>> out(its.indices.size(), { Vec2f::Zero(), Vec2f::Zero(), Vec2f::Zero() });
     if (its.indices.empty() || its.vertices.empty() || uv.faces.empty())
-        return;
+        return out;
     Vec3d its_min = its.vertices.front().cast<double>(), its_max = its_min;
     for (const stl_vertex& v : its.vertices) {
         its_min = its_min.cwiseMin(v.cast<double>());
@@ -63,36 +64,50 @@ void build_uv_model(GLModel& out, const indexed_triangle_set& its, const UVMesh&
         verts.emplace_back(its_min + (v - uv.min).cwiseProduct(scale));
     const auto tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(verts, uv.faces);
 
+    for (size_t i = 0; i < its.indices.size(); ++i) {
+        const stl_triangle_vertex_indices& f = its.indices[i];
+        const Vec3d corner[3] = { its.vertices[f(0)].cast<double>(), its.vertices[f(1)].cast<double>(), its.vertices[f(2)].cast<double>() };
+        const Vec3d centre    = (corner[0] + corner[1] + corner[2]) / 3.;
+        size_t      hit       = 0;
+        Vec3d       closest;
+        if (AABBTreeIndirect::squared_distance_to_indexed_triangle_set(verts, uv.faces, tree, centre, hit, closest) < 0.)
+            continue;
+        const stl_triangle_vertex_indices& g = uv.faces[hit];
+        const Vec3d &a = verts[g(0)], &b = verts[g(1)], &c = verts[g(2)];
+        const Vec3d  e0 = b - a, e1 = c - a;
+        const double d00 = e0.dot(e0), d01 = e0.dot(e1), d11 = e1.dot(e1), den = d00 * d11 - d01 * d01;
+        for (int k = 0; k < 3; ++k) {
+            const Vec3d  e2  = corner[k] - a;
+            const double d20 = e2.dot(e0), d21 = e2.dot(e1);
+            // Not clamped: a corner just off the UV triangle extrapolates within the same patch of the texture.
+            const double wb = std::abs(den) > 1e-18 ? (d11 * d20 - d01 * d21) / den : 0.;
+            const double wc = std::abs(den) > 1e-18 ? (d00 * d21 - d01 * d20) / den : 0.;
+            out[i][k]       = Vec2d(uv.uvs[3 * hit] * (1. - wb - wc) + uv.uvs[3 * hit + 1] * wb + uv.uvs[3 * hit + 2] * wc).cast<float>();
+        }
+    }
+    return out;
+}
+
+// The part's triangles, one vertex per corner, with the texture coordinates of the UV mesh (flat shaded).
+void build_uv_model(GLModel& out, const indexed_triangle_set& its, const UVMesh& uv)
+{
+    out.reset();
+    if (its.indices.empty() || its.vertices.empty() || uv.faces.empty())
+        return;
+    const std::vector<std::array<Vec2f, 3>> tex = corner_uvs(its, uv);
     GLModel::Geometry geometry;
     geometry.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3T2 };
     geometry.reserve_vertices(3 * its.indices.size());
     geometry.reserve_indices(3 * its.indices.size());
     unsigned int count = 0;
-    for (const stl_triangle_vertex_indices& f : its.indices) {
-        const Vec3d corner[3] = { its.vertices[f(0)].cast<double>(), its.vertices[f(1)].cast<double>(), its.vertices[f(2)].cast<double>() };
-        const Vec3d centre    = (corner[0] + corner[1] + corner[2]) / 3.;
-        size_t      hit       = 0;
-        Vec3d       closest;
-        Vec2d       tex[3]    = { Vec2d::Zero(), Vec2d::Zero(), Vec2d::Zero() };
-        if (AABBTreeIndirect::squared_distance_to_indexed_triangle_set(verts, uv.faces, tree, centre, hit, closest) >= 0.) {
-            const stl_triangle_vertex_indices& g = uv.faces[hit];
-            const Vec3d &a = verts[g(0)], &b = verts[g(1)], &c = verts[g(2)];
-            const Vec3d  e0 = b - a, e1 = c - a;
-            const double d00 = e0.dot(e0), d01 = e0.dot(e1), d11 = e1.dot(e1), den = d00 * d11 - d01 * d01;
-            for (int k = 0; k < 3; ++k) {
-                const Vec3d  e2  = corner[k] - a;
-                const double d20 = e2.dot(e0), d21 = e2.dot(e1);
-                // Not clamped: a corner just off the UV triangle extrapolates within the same patch of the texture.
-                const double wb = std::abs(den) > 1e-18 ? (d11 * d20 - d01 * d21) / den : 0.;
-                const double wc = std::abs(den) > 1e-18 ? (d00 * d21 - d01 * d20) / den : 0.;
-                tex[k]          = uv.uvs[3 * hit] * (1. - wb - wc) + uv.uvs[3 * hit + 1] * wb + uv.uvs[3 * hit + 2] * wc;
-            }
-        }
-        Vec3f n = (corner[1] - corner[0]).cross(corner[2] - corner[0]).cast<float>();
+    for (size_t i = 0; i < its.indices.size(); ++i) {
+        const stl_triangle_vertex_indices& f = its.indices[i];
+        const Vec3f corner[3] = { its.vertices[f(0)], its.vertices[f(1)], its.vertices[f(2)] };
+        Vec3f n = (corner[1] - corner[0]).cross(corner[2] - corner[0]);
         if (n.squaredNorm() > 0.f)
             n.normalize();
         for (int k = 0; k < 3; ++k)
-            geometry.add_vertex(Vec3f(corner[k].cast<float>()), n, Vec2f(tex[k].cast<float>()));
+            geometry.add_vertex(corner[k], n, tex[i][k]);
         count += 3;
         geometry.add_triangle(count - 3, count - 2, count - 1);
     }
@@ -110,8 +125,10 @@ std::string string_option(const ConfigOption* opt)
 namespace {
 // The part's mesh as patches of three for the tessellation shader (gouraud_displace), which splits them on the GPU and
 // moves the surface. The normals are smooth (weighted by the faces' areas): the shader moves the points along a
-// triangle's edges by them, the same for the triangles on both sides, so the moved surface stays closed.
-void build_patch_model(GLModel& out, const indexed_triangle_set& its)
+// triangle's edges by them, the same for the triangles on both sides, so the moved surface stays closed. With a UV
+// mesh, each corner also carries its texture coordinates; a vertex is shared by the triangles that agree on them and
+// split along the seams of the texture layout (there each side reads the image on its own side of the seam).
+void build_patch_model(GLModel& out, const indexed_triangle_set& its, const UVMesh* uv = nullptr)
 {
     std::vector<Vec3f> normals(its.vertices.size(), Vec3f::Zero());
     for (const stl_triangle_vertex_indices& f : its.indices) {
@@ -119,16 +136,41 @@ void build_patch_model(GLModel& out, const indexed_triangle_set& its)
         for (int k = 0; k < 3; ++k)
             normals[f(k)] += n;
     }
-    GLModel::Geometry g;
-    g.format = { GLModel::Geometry::EPrimitiveType::Patches, GLModel::Geometry::EVertexLayout::P3N3 };
-    g.reserve_vertices(its.vertices.size());
-    g.reserve_indices(3 * its.indices.size());
-    for (size_t i = 0; i < its.vertices.size(); ++i) {
-        const float len = normals[i].norm();
-        g.add_vertex(its.vertices[i], len > 0.f ? Vec3f(normals[i] / len) : Vec3f(Vec3f::UnitZ()));
+    for (Vec3f& n : normals) {
+        const float len = n.norm();
+        n               = len > 0.f ? Vec3f(n / len) : Vec3f(Vec3f::UnitZ());
     }
-    for (const stl_triangle_vertex_indices& f : its.indices)
-        g.add_triangle(unsigned(f(0)), unsigned(f(1)), unsigned(f(2)));
+    GLModel::Geometry g;
+    if (uv == nullptr) {
+        g.format = { GLModel::Geometry::EPrimitiveType::Patches, GLModel::Geometry::EVertexLayout::P3N3 };
+        g.reserve_vertices(its.vertices.size());
+        g.reserve_indices(3 * its.indices.size());
+        for (size_t i = 0; i < its.vertices.size(); ++i)
+            g.add_vertex(its.vertices[i], normals[i]);
+        for (const stl_triangle_vertex_indices& f : its.indices)
+            g.add_triangle(unsigned(f(0)), unsigned(f(1)), unsigned(f(2)));
+    } else {
+        const std::vector<std::array<Vec2f, 3>> tex = corner_uvs(its, *uv);
+        g.format = { GLModel::Geometry::EPrimitiveType::Patches, GLModel::Geometry::EVertexLayout::P3N3T2 };
+        g.reserve_vertices(its.vertices.size());
+        g.reserve_indices(3 * its.indices.size());
+        // per mesh vertex: the texture coordinates it has been given so far and the model vertex of each
+        std::vector<std::vector<std::pair<Vec2f, unsigned>>> shared(its.vertices.size());
+        unsigned count  = 0;
+        auto     vertex = [&](int v, const Vec2f& t) {
+            for (const auto& [t2, id] : shared[v])
+                if ((t2 - t).cwiseAbs().maxCoeff() < 1e-5f)
+                    return id;
+            g.add_vertex(its.vertices[v], normals[v], t);
+            shared[v].emplace_back(t, count);
+            return count++;
+        };
+        for (size_t i = 0; i < its.indices.size(); ++i) {
+            const stl_triangle_vertex_indices& f = its.indices[i];
+            const unsigned a = vertex(f(0), tex[i][0]), b = vertex(f(1), tex[i][1]), c = vertex(f(2), tex[i][2]);
+            g.add_triangle(a, b, c);
+        }
+    }
     out.reset();
     out.init_from(std::move(g));
 }
@@ -387,12 +429,13 @@ bool DisplacementPreview::update(GLVolumeCollection& volumes, const Model& model
         mixf(dp.center.y());
         mix(size_t(v->displacement_uv_mesh_source));
 
-        // The surface moved live by the tessellation shader. Not for UV (the patch model has no texture coordinates):
-        // there the shading alone shows the map.
-        if (can_tessellate && projection != FuzzySkinTextureProjection::UV) {
-            const size_t key = size_t(mv->mesh_ptr().get()) ^ (mv->mesh().its.indices.size() << 1);
+        // The surface moved live by the tessellation shader; with UV, the patches carry the texture coordinates.
+        if (can_tessellate) {
+            size_t key = size_t(mv->mesh_ptr().get()) ^ (mv->mesh().its.indices.size() << 1);
+            if (uv)
+                key ^= std::hash<const void*>()(uv.get()) * 31 + 1;
             if (v->displacement_mesh_key != key || !v->displacement_mesh_model.is_initialized()) {
-                build_patch_model(v->displacement_mesh_model, mv->mesh().its);
+                build_patch_model(v->displacement_mesh_model, mv->mesh().its, uv.get());
                 v->displacement_mesh_key = key;
             }
             dp.displaced = true;
@@ -573,7 +616,7 @@ void DisplacementPreview::render_panel(GLCanvas3D& canvas)
         float value = float(o->getFloat());
         if (top <= 0.f) {
             if (!m_drag || m_drag->key != key)
-                m_slider_top[key] = std::max(1.f, 2.f * value);
+                m_slider_top[key] = std::min(std::max(1.f, 2.f * value), float(def->max));
             top = m_slider_top[key];
         }
         row(*def);

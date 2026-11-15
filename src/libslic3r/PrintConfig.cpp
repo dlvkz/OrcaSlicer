@@ -3112,11 +3112,12 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Texture depth");
     def->full_label = L("Surface texture depth");
     def->category = L("Others");
-    def->tooltip = L("How far the texture moves the wall in and out (fuzzy skin thickness). It's advised to be below outer wall "
-                     "line width.");
+    def->tooltip = L("How far the texture moves the wall in and out (fuzzy skin thickness). For random noise, it's advised to be "
+                     "below outer wall line width; a displacement map can go deeper.");
     def->sidetext = "mm";	// milimeters, don't need translation
     def->min = 0;
-    def->max = 1;
+    // Up to 1 mm for the noise types upstream; displacement maps (bricks, deep relief) need more.
+    def->max = 10;
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionFloat(0.2));
 

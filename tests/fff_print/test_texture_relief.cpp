@@ -71,9 +71,10 @@ TEST_CASE("Textured OBJ loads with one texture coordinate triple per imported fa
     fs::remove_all(dir);
 }
 
-TEST_CASE("Normal map becomes a surface displacement map", "[TextureRelief]")
+namespace {
+
+void write_ridge_maps(const fs::path& dir)
 {
-    const fs::path dir = temp_folder();
     std::vector<uint8_t> colour(64 * 8 * 3, 200);
     REQUIRE(png::write_rgb_to_file((dir / "colour.png").string(), 64, 8, colour));
     // ridges across the top: the normal tilts along x as a sine
@@ -86,6 +87,58 @@ TEST_CASE("Normal map becomes a surface displacement map", "[TextureRelief]")
             normal.push_back(uint8_t(std::lround((nz + 1.) / 2. * 255.)));
         }
     REQUIRE(png::write_rgb_to_file((dir / "normal.png").string(), 64, 64, normal));
+}
+
+} // namespace
+
+TEST_CASE("Normal map still matches a mesh whose facets were reversed", "[TextureRelief]")
+{
+    // Loading a project turns an inside-out mesh the right way out by reversing every facet (3MF), so the volume's
+    // facets list their corners in another order than the model file. The texture coordinates must follow the corners
+    // instead of the model being skipped.
+    const fs::path dir = temp_folder();
+    write_ridge_maps(dir);
+    write_cube_obj(dir, {0.5, 0.5, 0.5, 0.5, 0.5, 0.5}, true);
+
+    Model        model  = Model::read_from_file((dir / "cube.obj").string());
+    ModelObject* object = model.objects[0];
+    object->add_instance();
+    ModelVolume* volume = object->volumes[0];
+    TriangleMesh flipped = volume->mesh();
+    flipped.flip_triangles();
+    volume->set_mesh(std::move(flipped));
+    const indexed_triangle_set& its = volume->mesh().its;
+
+    auto tm = textured_mesh_of_volume(*object, *volume);
+    REQUIRE(tm != nullptr);
+    REQUIRE(tm->its.indices.size() == its.indices.size());
+    // Texture coordinate c of every facet belongs to the volume's corner c. The importer moves the mesh, so compare
+    // from each mesh's lowest corner.
+    Vec3f min_a = tm->its.vertices.front(), min_b = its.vertices.front();
+    for (const Vec3f& v : tm->its.vertices)
+        min_a = min_a.cwiseMin(v);
+    for (const Vec3f& v : its.vertices)
+        min_b = min_b.cwiseMin(v);
+    for (size_t f = 0; f < its.indices.size(); ++f)
+        for (int c = 0; c < 3; ++c) {
+            const Vec3f a = tm->its.vertices[tm->its.indices[f](c)] - min_a, b = its.vertices[its.indices[f](c)] - min_b;
+            REQUIRE((a - b).norm() < 1e-3f);
+        }
+    REQUIRE(has_normal_map(*object));
+
+    TextureReliefParams params;
+    params.output_dir = dir.string();
+    TextureReliefReport report;
+    std::string         error;
+    REQUIRE(apply_normal_map_relief(*object, params, report, error));
+    REQUIRE(report.depth_mm > 0.05);
+    fs::remove_all(dir);
+}
+
+TEST_CASE("Normal map becomes a surface displacement map", "[TextureRelief]")
+{
+    const fs::path dir = temp_folder();
+    write_ridge_maps(dir);
     write_cube_obj(dir, {0.5, 0.5, 0.5, 0.5, 0.5, 0.5}, true);
 
     Model        model  = Model::read_from_file((dir / "cube.obj").string());

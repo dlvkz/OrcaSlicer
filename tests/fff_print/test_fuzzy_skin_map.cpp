@@ -11,6 +11,7 @@
 #include "libslic3r/TriangleMeshSlicer.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
 #include "libslic3r/Polygon.hpp"
+#include "libslic3r/PrintConfig.hpp"
 
 using namespace Slic3r;
 using namespace Slic3r::Feature::FuzzySkin;
@@ -668,4 +669,14 @@ TEST_CASE("Per layer displacement moves outlines sideways only, with every proje
             REQUIRE(layers.back().empty());
         }
     }
+}
+
+TEST_CASE("Texture depth can go past the 1 mm of fuzzy skin noise", "[FuzzySkin]")
+{
+    // The setting came from fuzzy skin, capped at 1 mm; bricks and deep relief need more, so it goes to 10 mm.
+    FullPrintConfig config;
+    config.fuzzy_skin_thickness.value = 3.;
+    REQUIRE(validate(config).count("fuzzy_skin_thickness") == 0);
+    config.fuzzy_skin_thickness.value = 11.;
+    REQUIRE(validate(config).count("fuzzy_skin_thickness") == 1);
 }

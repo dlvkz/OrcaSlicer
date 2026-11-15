@@ -5505,6 +5505,10 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
     // own too, unless the canvas is already dragging (a camera drag that crosses the panel).
     const bool panel_drag = m_displacement_preview.dragging() ||
                             (!m_mouse.dragging && !evt.Leaving() && m_displacement_preview.panel_contains(float(pos.x()), float(pos.y())));
+    // Leaving the canvas doesn't end a slider drag: the leave event carries no button state of its own, and read as a
+    // release it would end the drag, and the next move would start a new one.
+    if (evt.Leaving() && m_displacement_preview.dragging())
+        return;
     if (imgui->update_mouse_data(evt) || panel_drag) {
         if (panel_drag && !imgui->want_mouse())
             imgui->new_frame();
