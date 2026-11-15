@@ -132,7 +132,7 @@ The texture is applied while slicing: the mesh is never subdivided, so a 12-tria
 ### Quick start
 
 1. Select the object (or set it in the process preset) and set **Textured walls** to Contour.
-2. Set **Texture type** to **Displacement map**. The **Displacement map** group appears: pick a **Pattern**, a built-in one or **Image** and your own PNG or JPEG.
+2. Set **Texture type** to **Displacement map**. The **Displacement map** group appears: pick a **Pattern**: one of the pattern textures, or **Image** and a PNG or JPEG file.
 3. Pick a **Projection** and a **Tile size**, then set the **Texture depth**: 0.3 to 0.6 mm reads well with a 0.4 mm nozzle.
 4. Keep **Displace the whole surface** on, so tops, slopes and overhangs get the texture too, then slice.
 

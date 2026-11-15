@@ -335,7 +335,7 @@ TEST_CASE("Built-in displacement patterns tile seamlessly over the full range", 
     }
 }
 
-TEST_CASE("A built-in pattern needs no image file", "[FuzzySkin]")
+TEST_CASE("A pattern texture needs no image file", "[FuzzySkin]")
 {
     std::string error;
     REQUIRE(load_texture(FuzzySkinTexturePattern::Knurl, "", &error, true) == pattern_displacement_map(FuzzySkinTexturePattern::Knurl));
@@ -416,7 +416,7 @@ TEST_CASE("Displacement map projections", "[FuzzySkin]")
     }
 }
 
-TEST_CASE("Whole surface displacement with a built-in pattern", "[FuzzySkin]")
+TEST_CASE("Whole surface displacement with a pattern texture", "[FuzzySkin]")
 {
     // Bumps over a cube's walls: on the layers through the middle of a row of bumps the walls move out where the bumps
     // are, never more than the depth. The cube spans 0..20 mm, so with 5 mm tiles the bumps sit at multiples of 5 mm

@@ -47,7 +47,7 @@ public:
                    const std::vector<Vec3d>&                       vertices,
                    const std::vector<stl_triangle_vertex_indices>& faces);
 
-    // For the charts: the image (a built-in pattern or a file) and its counter-clockwise turn, degrees.
+    // For the charts: the image (a pattern texture or a file) and its counter-clockwise turn, degrees.
     void set_map(std::shared_ptr<const DisplacementMap> map, double rotation_deg);
 
     // Height in [0, 1] at a point on the surface (or near it) whose outward unit normal is n (zero if unknown: charts of

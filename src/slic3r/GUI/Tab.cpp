@@ -3072,7 +3072,7 @@ optgroup->append_single_option_line("skirt_loops", "others_settings_skirt#loops"
 
         optgroup->append_single_option_line("timelapse_type", "others_settings_special_mode#timelapse");
 
-        // Fuzzy skin grew into general surface texturing (noise, built-in patterns, images): the settings keep their
+        // Fuzzy skin grew into general surface texturing (noise, pattern textures, images): the settings keep their
         // fuzzy_skin_* keys, the page shows them as "Surface texture", with the displacement map settings in a group of
         // their own that is only shown for that texture type.
         optgroup = page->new_optgroup(L("Surface texture"), L"fuzzy_skin");

@@ -9,7 +9,7 @@ namespace Slic3r::Feature::FuzzySkin {
 
 struct DisplacementMap;
 
-// A built-in pattern as a displacement map: one tile that repeats seamlessly in both directions, heights spread over
+// A pattern texture as a displacement map: one tile that repeats seamlessly in both directions, heights spread over
 // [0, 1]. Generated once per pattern and kept for the process. nullptr for FuzzySkinTexturePattern::Image.
 std::shared_ptr<const DisplacementMap> pattern_displacement_map(FuzzySkinTexturePattern pattern);
 

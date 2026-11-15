@@ -31,7 +31,7 @@ struct DisplacementMap
 // PNG and JPEG images are read.
 std::shared_ptr<const DisplacementMap> load_displacement_map(const std::string& path, std::string* error, bool reload_if_modified);
 
-// The image at path, or a built-in pattern (see TexturePatterns.hpp).
+// The image at path, or a pattern texture (see TexturePatterns.hpp).
 std::shared_ptr<const DisplacementMap> load_texture(FuzzySkinTexturePattern pattern, const std::string& path, std::string* error,
                                                     bool reload_if_modified);
 // The texture a region's settings ask for.

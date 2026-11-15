@@ -3174,7 +3174,7 @@ void PrintConfigDef::init_fff_params()
                      "Billow: Similar to perlin noise, but clumpier.\n"
                      "Ridged Multifractal: Ridged noise with sharp, jagged features. Creates marble-like textures.\n"
                      "Voronoi: Divides the surface into voronoi cells, and displaces each one by a random amount. Creates a patchwork texture.\n"
-                     "Displacement map: Displaces the walls by the brightness of an image or of a built-in pattern, like a displacement map in a renderer. "
+                     "Displacement map: Displaces the walls by the brightness of an image or of a pattern texture, like a displacement map in a renderer. "
                      "White pushes the wall out by the texture depth, black pulls it in by the same amount, and mid grey leaves it in place.");
     def->enum_keys_map = &ConfigOptionEnum<NoiseType>::get_enum_values();
     def->enum_values.push_back("classic");
@@ -3227,7 +3227,7 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Pattern");
     def->full_label = L("Displacement map pattern");
     def->category = L("Others");
-    def->tooltip = L("What the displacement map displaces the surface by: an image of your own, or a pattern built into the slicer. "
+    def->tooltip = L("What the displacement map displaces the surface by: a pattern texture, or an image file. "
                      "Each pattern repeats seamlessly; the tile size sets the size of one repeat.\n"
                      "Image: The image set in \"Image\" below.\n"
                      "Knurl: Diamond knurling, like a tool grip.\n"
