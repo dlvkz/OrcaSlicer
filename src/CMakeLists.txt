@@ -644,6 +644,10 @@ if (WIN32)
         install(TARGETS Snapmaker_Orca_app_gui RUNTIME DESTINATION ".")
     endif ()
     install(FILES ${output_dlls_${build_type}} DESTINATION ".")
+    # stable-diffusion.cpp and ggml for "Generate from text" (only set when SDCPP_ROOT holds a shared build).
+    if (SDCPP_RUNTIME_LIBS)
+        install(FILES ${SDCPP_RUNTIME_LIBS} DESTINATION ".")
+    endif ()
     # MESA llvmpipe software-OpenGL fallback: the snapmaker-orca.exe shim loads
     # <install>/mesa/opengl32.dll before Snapmaker_Orca.dll whenever the system
     # OpenGL driver is unusable (< 2.0, e.g. disabled GPU -> GDI generic 1.1),

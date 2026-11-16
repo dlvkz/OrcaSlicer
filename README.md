@@ -68,6 +68,15 @@ panel at the top left of the 3D view):
 
 The full reference is in the [Surface texture / fuzzy skin page](doc/print_settings/others/others_settings_fuzzy_skin.md#displacement-map).
 
+## Download
+
+Windows 10/11, 64-bit: get the portable zip from the [latest release](https://github.com/dlvkz/OrcaSlicer/releases/tag/displacement-maps-v1),
+unzip it anywhere and run `snapmaker-orca.exe`. It can sit next to an official Snapmaker Orca install.
+
+The release does not include Snapmaker's printer connection helper, a closed-source Snapmaker program. Slicing and G-code
+export work without it. To connect to your printer from the app, copy `resources\snapmaker_control_windows_x64.exe` from an
+official Snapmaker Orca 2.4.1 install into the same folder of this build.
+
 ## Examples
 
 All renders below are made from the sliced G-code: every extrusion is drawn as a bead at its real width and height, so they show
